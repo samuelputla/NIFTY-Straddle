@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets / credentials
+access_token.txt
+.env
+*.token
+secrets/
+credentials/
+
+# Local files
+*.log
