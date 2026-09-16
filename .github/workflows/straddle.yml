@@ -2,10 +2,15 @@ name: NIFTY Straddle Paper Test
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1-5"
 
 jobs:
   straddle:
     runs-on: ubuntu-latest
+
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
 
     steps:
       - name: Checkout repository
