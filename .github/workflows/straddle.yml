@@ -23,9 +23,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install fyers-apiv3
-          pip install pytz
+  run: |
+    pip install fyers-apiv3
+    pip install pytz
+    pip install gspread
+    pip install google-auth
 
       - name: Run NIFTY straddle
         run: |
