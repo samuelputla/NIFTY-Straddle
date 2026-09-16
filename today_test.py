@@ -118,21 +118,15 @@ vix_data = {
 vix_response = fyers.quotes(data=vix_data)
 
 if vix_response.get("s") != "ok":
-
     print("\n❌ India VIX quote failed")
     print(vix_response)
-
-    print(
-        "\nThe NIFTY entry can still be captured, "
-        "but today's test requires India VIX."
-    )
-
     raise SystemExit
 
 india_vix = float(
     vix_response["d"][0]["v"]["lp"]
 )
 
+print(f"India VIX : {india_vix:.2f}")
 # ============================================================
 # DETERMINE ATM
 # ============================================================
