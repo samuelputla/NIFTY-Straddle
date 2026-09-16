@@ -10,11 +10,39 @@ from zoneinfo import ZoneInfo
 CLIENT_ID = "M2DACFCYUO-100"
 
 import os
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 
 ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
 
 if not ACCESS_TOKEN:
     raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
+    # ============================================================
+# GOOGLE SHEETS CONFIGURATION
+# ============================================================
+
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+
+if not GOOGLE_SERVICE_ACCOUNT_JSON:
+    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set")
+
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+credentials = Credentials.from_service_account_info(
+    json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+    scopes=GOOGLE_SCOPES
+)
+
+gc = gspread.authorize(credentials)
+
+SPREADSHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
+
+spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+sheet = spreadsheet.worksheet("Sheet1")
 
 fyers = fyersModel.FyersModel(
     client_id=CLIENT_ID,
@@ -317,3 +345,69 @@ print(
 print("==============================================")
 print("✅ ENTRY CAPTURE COMPLETE")
 print("==============================================")
+# ============================================================
+# WRITE ENTRY TO GOOGLE SHEETS
+# ============================================================
+
+headers = [
+    "Date",
+    "Time",
+    "NIFTY Spot",
+    "India VIX",
+    "ATM",
+    "Expiry",
+    "CE Entry",
+    "PE Entry",
+    "CE Symbol",
+    "PE Symbol",
+    "CE 10% SL",
+    "CE 15% SL",
+    "CE 20% SL",
+    "CE 25% SL",
+    "CE 30% SL",
+    "CE 35% SL",
+    "CE 40% SL",
+    "PE 10% SL",
+    "PE 15% SL",
+    "PE 20% SL",
+    "PE 25% SL",
+    "PE 30% SL",
+    "PE 35% SL",
+    "PE 40% SL",
+]
+
+# Create headers if Sheet1 is empty
+if not sheet.get_all_values():
+    sheet.append_row(headers)
+
+# Calculate SL levels
+ce_sl_values = [
+    round(ce_entry * (1 + p / 100), 2)
+    for p in SL_PERCENTAGES
+]
+
+pe_sl_values = [
+    round(pe_entry * (1 + p / 100), 2)
+    for p in SL_PERCENTAGES
+]
+
+row = [
+    capture_time.strftime("%Y-%m-%d"),
+    capture_time.strftime("%H:%M:%S"),
+    round(nifty_spot, 2),
+    round(india_vix, 2),
+    atm,
+    expiry["date"],
+    round(ce_entry, 2),
+    round(pe_entry, 2),
+    ce["symbol"],
+    pe["symbol"],
+    *ce_sl_values,
+    *pe_sl_values,
+]
+
+sheet.append_row(row)
+
+print("=================================================")
+print("✅ GOOGLE SHEETS UPDATE COMPLETE")
+print("=================================================")
