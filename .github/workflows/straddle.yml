@@ -7,6 +7,9 @@ on:
         description: "Run a short live-feed verification instead of the full 09:30-15:00 session"
         required: false
         default: "false"
+  push:
+    branches: [main]
+    paths: [".paper-test-trigger"]
   schedule:
     # GitHub cron is UTC. 04:00 UTC = 09:30 IST.
     - cron: "0 4 * * 1-5"
@@ -23,7 +26,7 @@ jobs:
     env:
       FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+      TEST_MODE: ${{ github.event_name == 'push' && 'true' || github.event.inputs.test_mode || 'false' }}
       MONITOR_MINUTES: "2"
 
     steps:
