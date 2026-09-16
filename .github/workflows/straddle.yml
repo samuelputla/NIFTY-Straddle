@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-  FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
-  GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
 
     steps:
       - name: Checkout repository
@@ -23,11 +23,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-  run: |
-    pip install fyers-apiv3
-    pip install pytz
-    pip install gspread
-    pip install google-auth
+        run: |
+          pip install fyers-apiv3
+          pip install pytz
+          pip install gspread
+          pip install google-auth
 
       - name: Run NIFTY straddle
         run: |
