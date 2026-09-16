@@ -9,8 +9,12 @@ from zoneinfo import ZoneInfo
 
 CLIENT_ID = "M2DACFCYUO-100"
 
-with open("access_token.txt", "r") as f:
-    ACCESS_TOKEN = f.read().strip()
+import os
+
+ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN")
+
+if not ACCESS_TOKEN:
+    raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
 
 fyers = fyersModel.FyersModel(
     client_id=CLIENT_ID,
