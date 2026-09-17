@@ -6,7 +6,8 @@ on:
       test_mode:
         description: "Run a short live-feed verification instead of the full 09:30-15:00 session"
         required: false
-        default: "false"
+        type: boolean
+        default: false
   schedule:
     # GitHub cron is UTC. 04:00 UTC = 09:30 IST.
     - cron: "0 4 * * 1-5"
@@ -21,9 +22,10 @@ jobs:
     timeout-minutes: 400
 
     env:
-  FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
-  GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-  TEST_MODE: "true"
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TEST_MODE: ${{ inputs.test_mode || 'false' }}
+      MONITOR_MINUTES: "2"
 
     steps:
       - name: Checkout repository
