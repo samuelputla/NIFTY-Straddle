@@ -21,10 +21,9 @@ jobs:
     timeout-minutes: 400
 
     env:
-      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
-      MONITOR_MINUTES: "2"
+  FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+  GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+  TEST_MODE: "true"
 
     steps:
       - name: Checkout repository
