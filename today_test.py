@@ -48,25 +48,40 @@ credentials = Credentials.from_service_account_info(
 )
 gc = gspread.authorize(credentials)
 spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-sheet = spreadsheet.worksheet(SHEET_NAME)
 
-HEADERS = [
-    "Date", "Time", "NIFTY Spot", "India VIX", "ATM", "Expiry",
-    "CE Entry", "PE Entry", "CE Symbol", "PE Symbol",
-    "CE SL 10%", "CE SL 15%", "CE SL 20%", "CE SL 25%", "CE SL 30%", "CE SL 35%", "CE SL 40%",
-    "PE SL 10%", "PE SL 15%", "PE SL 20%", "PE SL 25%", "PE SL 30%", "PE SL 35%", "PE SL 40%",
-    "CE LTP", "PE LTP", "CE SL Hit", "PE SL Hit",
-    "CE Exit", "PE Exit", "CE Exit Time", "PE Exit Time",
-    "CE P&L", "PE P&L", "Total P&L", "Status", "Last Update", "Run Type",
+# Keep the existing Sheet1 history intact. Each stop-loss scenario is written
+# as its own row in a dedicated worksheet.
+SCENARIO_SHEET_NAME = "SL_Scenarios"
+SCENARIO_HEADERS = [
+    "Date", "Entry Time", "NIFTY Spot", "India VIX", "ATM", "Expiry", "SL %",
+    "CE Symbol", "PE Symbol", "CE Entry", "CE Stop Price", "CE SL Hit",
+    "CE Hit Time", "CE Exit Price", "CE Exit Time", "CE Exit Reason", "CE P&L",
+    "PE Entry", "PE Stop Price", "PE SL Hit", "PE Hit Time", "PE Exit Price",
+    "PE Exit Time", "PE Exit Reason", "PE P&L", "Total P&L", "Status",
+    "Last Update", "Run Type",
 ]
 
-# Ensure the complete header row exists. This also extends the headers
-# beyond the 24 columns the sheet currently has.
-current_headers = sheet.row_values(1)
-if current_headers[:len(HEADERS)] != HEADERS:
-    sheet.batch_update([
-        {"range": f"A1:AL1", "values": [HEADERS]}
-    ], value_input_option="RAW")
+worksheet_titles = {worksheet.title for worksheet in spreadsheet.worksheets()}
+if SCENARIO_SHEET_NAME in worksheet_titles:
+    scenario_sheet = spreadsheet.worksheet(SCENARIO_SHEET_NAME)
+else:
+    scenario_sheet = spreadsheet.add_worksheet(
+        title=SCENARIO_SHEET_NAME,
+        rows=1000,
+        cols=len(SCENARIO_HEADERS),
+    )
+
+current_scenario_headers = scenario_sheet.row_values(1)
+if not current_scenario_headers:
+    scenario_sheet.update(
+        range_name="A1:AC1",
+        values=[SCENARIO_HEADERS],
+        value_input_option="RAW",
+    )
+elif current_scenario_headers[:len(SCENARIO_HEADERS)] != SCENARIO_HEADERS:
+    raise RuntimeError(
+        f"Unexpected headers in {SCENARIO_SHEET_NAME}; refusing to overwrite them"
+    )
 
 # ============================================================
 # FYERS REST CLIENT
@@ -89,28 +104,72 @@ def fmt_time(dt):
     return dt.strftime("%H:%M:%S")
 
 
-def update_sheet(row_number, updates):
-    """updates = [(column_number, value), ...]"""
-    data = []
-    for col, value in updates:
-        data.append({
-            "range": gspread.utils.rowcol_to_a1(row_number, col),
-            "values": [[value]],
+def make_scenario_row(percent):
+    scenario = state["scenarios"][percent]
+    index = SL_PERCENTAGES.index(percent)
+    ce_exit = scenario["ce_exit"]
+    pe_exit = scenario["pe_exit"]
+    ce_pnl = round(ce_entry - ce_exit, 2) if ce_exit is not None else ""
+    pe_pnl = round(pe_entry - pe_exit, 2) if pe_exit is not None else ""
+    total_pnl = round(ce_pnl + pe_pnl, 2) if ce_pnl != "" and pe_pnl != "" else ""
+    status = "TEST COMPLETE" if state["complete"] and TEST_MODE else (
+        "COMPLETED" if state["complete"] else "RUNNING"
+    )
+    return [
+        capture_time.strftime("%Y-%m-%d"),
+        capture_time.strftime("%H:%M:%S"),
+        round(nifty_spot, 2),
+        round(india_vix, 2),
+        atm,
+        expiry["date"],
+        percent,
+        ce_symbol,
+        pe_symbol,
+        round(ce_entry, 2),
+        ce_sl_values[index],
+        "HIT" if scenario["ce_hit"] else "NOT HIT",
+        fmt_time(scenario["ce_hit_time"]) if scenario["ce_hit_time"] else "",
+        round(ce_exit, 2) if ce_exit is not None else "",
+        fmt_time(scenario["ce_exit_time"]) if scenario["ce_exit_time"] else "",
+        scenario["ce_exit_reason"],
+        ce_pnl,
+        round(pe_entry, 2),
+        pe_sl_values[index],
+        "HIT" if scenario["pe_hit"] else "NOT HIT",
+        fmt_time(scenario["pe_hit_time"]) if scenario["pe_hit_time"] else "",
+        round(pe_exit, 2) if pe_exit is not None else "",
+        fmt_time(scenario["pe_exit_time"]) if scenario["pe_exit_time"] else "",
+        scenario["pe_exit_reason"],
+        pe_pnl,
+        total_pnl,
+        status,
+        fmt_time(now_ist()),
+        RUN_TYPE,
+    ]
+
+
+def update_scenario_rows(percentages):
+    updates = []
+    for percent in sorted(set(percentages)):
+        row_number = scenario_row_numbers[percent]
+        updates.append({
+            "range": f"A{row_number}:AC{row_number}",
+            "values": [make_scenario_row(percent)],
         })
-    if data:
-        sheet.batch_update(data, value_input_option="RAW")
+    if updates:
+        scenario_sheet.batch_update(updates, value_input_option="RAW")
 
 
-def append_entry(row):
-    # Append into the next logical row and return its row number.
-    existing = sheet.get_all_values()
-    row_number = max(2, len(existing) + 1)
-    sheet.update(
-        f"A{row_number}:AL{row_number}",
-        [row],
+def append_scenario_rows(rows):
+    existing = scenario_sheet.get_all_values()
+    first_row = max(2, len(existing) + 1)
+    last_row = first_row + len(rows) - 1
+    scenario_sheet.update(
+        range_name=f"A{first_row}:AC{last_row}",
+        values=rows,
         value_input_option="RAW",
     )
-    return row_number
+    return first_row
 
 
 def get_quote(symbol):
@@ -192,96 +251,66 @@ print(f"Expiry     : {expiry['date']}")
 print(f"CE         : {ce_symbol} @ {ce_entry:.2f}")
 print(f"PE         : {pe_symbol} @ {pe_entry:.2f}")
 
-row = [
-    capture_time.strftime("%Y-%m-%d"),
-    capture_time.strftime("%H:%M:%S"),
-    round(nifty_spot, 2),
-    round(india_vix, 2),
-    atm,
-    expiry["date"],
-    round(ce_entry, 2),
-    round(pe_entry, 2),
-    ce_symbol,
-    pe_symbol,
-    *ce_sl_values,
-    *pe_sl_values,
-    ce_entry,
-    pe_entry,
-    "NOT HIT",
-    "NOT HIT",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "RUNNING",
-    capture_time.strftime("%H:%M:%S"),
-    RUN_TYPE,
-]
-
-row_number = append_entry(row)
-print(f"Google Sheet row: {row_number}")
-
 # ============================================================
-# LIVE MONITORING STATE
+# INDEPENDENT PAPER SCENARIOS
 # ============================================================
 state = {
     "ce_ltp": ce_entry,
     "pe_ltp": pe_entry,
-    "ce_active": True,
-    "pe_active": True,
-    "ce_hit_levels": set(),
-    "pe_hit_levels": set(),
-    "ce_exit": None,
-    "pe_exit": None,
-    "ce_exit_time": None,
-    "pe_exit_time": None,
+    "complete": False,
+    "scenarios": {},
 }
+for percent in SL_PERCENTAGES:
+    state["scenarios"][percent] = {
+        "ce_hit": False,
+        "ce_hit_time": None,
+        "ce_exit": None,
+        "ce_exit_time": None,
+        "ce_exit_reason": "",
+        "pe_hit": False,
+        "pe_hit_time": None,
+        "pe_exit": None,
+        "pe_exit_time": None,
+        "pe_exit_reason": "",
+    }
+
+scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
+scenario_first_row = append_scenario_rows(scenario_rows)
+scenario_row_numbers = {
+    percent: scenario_first_row + index
+    for index, percent in enumerate(SL_PERCENTAGES)
+}
+print(f"Google Sheet {SCENARIO_SHEET_NAME} rows: {scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}")
+
 state_lock = threading.Lock()
 stop_event = threading.Event()
 ws_holder = {"socket": None}
 
 
-def handle_sl(leg, ltp, entry, levels):
-    """Record every crossed level; the first crossed level is the paper stop exit."""
+def handle_sl(leg, ltp):
+    """Track each stop percentage independently for the specified option leg."""
+    leg_key = "ce" if leg == "CE" else "pe"
+    sl_values = ce_sl_values if leg_key == "ce" else pe_sl_values
+    changed_percentages = []
+    observed_at = now_ist()
+
     with state_lock:
-        state_key = "ce" if leg == "CE" else "pe"
-        active_key = f"{state_key}_active"
-        hit_key = f"{state_key}_hit_levels"
-        exit_key = f"{state_key}_exit"
-        exit_time_key = f"{state_key}_exit_time"
+        state[f"{leg_key}_ltp"] = ltp
+        for percent, stop_price in zip(SL_PERCENTAGES, sl_values):
+            scenario = state["scenarios"][percent]
+            hit_key = f"{leg_key}_hit"
+            if not scenario[hit_key] and ltp >= stop_price:
+                scenario[hit_key] = True
+                scenario[f"{leg_key}_hit_time"] = observed_at
+                scenario[f"{leg_key}_exit"] = ltp
+                scenario[f"{leg_key}_exit_time"] = observed_at
+                scenario[f"{leg_key}_exit_reason"] = "STOP LOSS"
+                changed_percentages.append(percent)
 
-        crossed = [p for p, level in zip(SL_PERCENTAGES, levels) if ltp >= level]
-        new_crossed = [p for p in crossed if p not in state[hit_key]]
-        if new_crossed:
-            state[hit_key].update(new_crossed)
-            status_text = f"{min(new_crossed)}% HIT @ {ltp:.2f}"
-            print(f"\n🚨 {leg} {status_text}")
-            status_col = 27 if leg == "CE" else 28
-            ltp_col = 25 if leg == "CE" else 26
-            update_sheet(row_number, [
-                (ltp_col, round(ltp, 2)),
-                (status_col, status_text),
-                (37, fmt_time(now_ist())),
-            ])
-
-        # 10% is the first and therefore actual paper stop. If price jumps
-        # over several levels, record all crossed levels but exit this leg
-        # at the observed LTP on the first crossing.
-        if state[active_key] and crossed:
-            state[active_key] = False
-            state[exit_key] = ltp
-            state[exit_time_key] = now_ist()
-            exit_col = 29 if leg == "CE" else 30
-            exit_time_col = 31 if leg == "CE" else 32
-            update_sheet(row_number, [
-                (exit_col, round(ltp, 2)),
-                (exit_time_col, fmt_time(state[exit_time_key])),
-                (37, fmt_time(now_ist())),
-            ])
-            print(f"{leg} paper exit @ {ltp:.2f}")
+    if changed_percentages:
+        levels_text = ", ".join(f"{percent}%" for percent in changed_percentages)
+        print(f"\n🚨 {leg} stop scenario(s) hit: {levels_text} @ {ltp:.2f}")
+        update_scenario_rows(changed_percentages)
 
 
 def on_message(message):
@@ -297,13 +326,9 @@ def on_message(message):
         return
 
     if symbol == ce_symbol:
-        state["ce_ltp"] = ltp
-        if state["ce_active"]:
-            handle_sl("CE", ltp, ce_entry, ce_sl_values)
+        handle_sl("CE", ltp)
     elif symbol == pe_symbol:
-        state["pe_ltp"] = ltp
-        if state["pe_active"]:
-            handle_sl("PE", ltp, pe_entry, pe_sl_values)
+        handle_sl("PE", ltp)
 
 
 def on_error(message):
@@ -370,49 +395,50 @@ print("\nConnecting to FYERS live feed...")
 ws.connect()
 
 # ============================================================
-# FINALIZE PAPER EXIT / P&L
+# FINALIZE EACH PAPER SCENARIO
 # ============================================================
-# If a leg did not hit its paper stop, take its 15:00/test-end quote.
-# If it already hit, preserve the stop exit price.
-if state["ce_exit"] is None:
-    try:
-        state["ce_exit"] = get_quote(ce_symbol)
-    except Exception:
-        state["ce_exit"] = state["ce_ltp"]
-    state["ce_exit_time"] = now_ist()
-if state["pe_exit"] is None:
-    try:
-        state["pe_exit"] = get_quote(pe_symbol)
-    except Exception:
-        state["pe_exit"] = state["pe_ltp"]
-    state["pe_exit_time"] = now_ist()
+# Every unhit leg/scenario exits independently at the 15:00 or test-end quote.
+final_ce_ltp = state["ce_ltp"]
+final_pe_ltp = state["pe_ltp"]
+try:
+    final_ce_ltp = get_quote(ce_symbol)
+except Exception as exc:
+    print("CE final quote warning; using last WebSocket price:", exc)
+try:
+    final_pe_ltp = get_quote(pe_symbol)
+except Exception as exc:
+    print("PE final quote warning; using last WebSocket price:", exc)
 
-ce_pnl = round(ce_entry - state["ce_exit"], 2)
-pe_pnl = round(pe_entry - state["pe_exit"], 2)
-total_pnl = round(ce_pnl + pe_pnl, 2)
-
-status = "TEST COMPLETE" if TEST_MODE else "COMPLETED"
-
-update_sheet(row_number, [
-    (25, round(state["ce_ltp"], 2)),
-    (26, round(state["pe_ltp"], 2)),
-    (29, round(state["ce_exit"], 2)),
-    (30, round(state["pe_exit"], 2)),
-    (31, fmt_time(state["ce_exit_time"])),
-    (32, fmt_time(state["pe_exit_time"])),
-    (33, ce_pnl),
-    (34, pe_pnl),
-    (35, total_pnl),
-    (36, status),
-    (37, fmt_time(now_ist())),
-])
+final_time = now_ist()
+final_reason = "TEST END" if TEST_MODE else "15:00 EXIT"
+with state_lock:
+    for percent in SL_PERCENTAGES:
+        scenario = state["scenarios"][percent]
+        if scenario["ce_exit"] is None:
+            scenario["ce_exit"] = final_ce_ltp
+            scenario["ce_exit_time"] = final_time
+            scenario["ce_exit_reason"] = final_reason
+        if scenario["pe_exit"] is None:
+            scenario["pe_exit"] = final_pe_ltp
+            scenario["pe_exit_time"] = final_time
+            scenario["pe_exit_reason"] = final_reason
+    state["complete"] = True
+    update_scenario_rows(SL_PERCENTAGES)
 
 print("\n=================================================")
-print("FINAL PAPER RESULT")
+print("FINAL PAPER RESULTS BY STOP-LOSS SCENARIO")
 print("=================================================")
-print(f"CE Entry : {ce_entry:.2f} | Exit : {state['ce_exit']:.2f} | P&L : {ce_pnl:.2f}")
-print(f"PE Entry : {pe_entry:.2f} | Exit : {state['pe_exit']:.2f} | P&L : {pe_pnl:.2f}")
-print(f"TOTAL P&L: {total_pnl:.2f}")
-print(f"Sheet row: {row_number}")
-print(f"Status   : {status}")
+for percent in SL_PERCENTAGES:
+    scenario = state["scenarios"][percent]
+    ce_pnl = round(ce_entry - scenario["ce_exit"], 2)
+    pe_pnl = round(pe_entry - scenario["pe_exit"], 2)
+    total_pnl = round(ce_pnl + pe_pnl, 2)
+    print(
+        f"{percent:>2}% SL | "
+        f"CE exit {scenario['ce_exit']:.2f} ({scenario['ce_exit_reason']}) "
+        f"P&L {ce_pnl:.2f} | "
+        f"PE exit {scenario['pe_exit']:.2f} ({scenario['pe_exit_reason']}) "
+        f"P&L {pe_pnl:.2f} | Total {total_pnl:.2f}"
+    )
+print(f"Google Sheet tab: {SCENARIO_SHEET_NAME}")
 print("=================================================")
