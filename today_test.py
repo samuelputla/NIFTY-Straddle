@@ -31,7 +31,7 @@ DAILY_SHEET_NAME = "Daily_Summary"
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
 MONITOR_MINUTES = max(1, int(os.getenv("MONITOR_MINUTES", "2")))
-RUN_TYPE = "MANUAL TEST" if TEST_MODE else "LIVE PAPER"
+RUN_TYPE = "MANUAL TEST" if TEST_MODE else "SCHEDULED PAPER"
 
 SCENARIO_HEADERS = [
     "Date", "Entry Time", "NIFTY Spot", "India VIX", "ATM", "Expiry", "SL %",
