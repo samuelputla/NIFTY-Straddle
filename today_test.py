@@ -44,14 +44,14 @@ SCENARIO_HEADERS = [
 ]
 DAILY_HEADERS = [
     "Date",
-    "Vix at 09:30",
+    "Vix at 09:30 AM",
     "Prev. Day High",
     "Prev. Day Low",
-    "Prev. Day Closing",
+    "Prev. Day closing",
     "Day Opening",
-    "Gap Up/Gap Down",
-    "CE OI",
-    "PE OI",
+    "Gap up/Gap Down",
+    "CE IO",
+    "PE IO",
     "PE/CE",
     "Market Bias",
     "Strike",
@@ -106,7 +106,8 @@ def ensure_worksheet(title, headers, rows=1000):
             cols=len(headers),
         )
 
-    existing_headers = sheet.row_values(1)
+    existing_values = sheet.get_all_values()
+    existing_headers = existing_values[0] if existing_values else []
     if not existing_headers:
         last_col = column_letter(len(headers))
         sheet.update(
@@ -114,10 +115,23 @@ def ensure_worksheet(title, headers, rows=1000):
             values=[headers],
             value_input_option="RAW",
         )
-    elif existing_headers[:len(headers)] != headers:
-        raise RuntimeError(
-            f"Unexpected headers in {title}; refusing to change existing data"
+    elif existing_headers != headers:
+        has_data_rows = any(
+            any(str(cell).strip() for cell in row)
+            for row in existing_values[1:]
         )
+        if len(existing_headers) == len(headers) and not has_data_rows:
+            # Safe schema-label migration while a sheet contains headers only.
+            last_col = column_letter(len(headers))
+            sheet.update(
+                range_name=f"A1:{last_col}1",
+                values=[headers],
+                value_input_option="RAW",
+            )
+        else:
+            raise RuntimeError(
+                f"Unexpected headers in {title}; refusing to change existing data"
+            )
     return sheet
 
 
