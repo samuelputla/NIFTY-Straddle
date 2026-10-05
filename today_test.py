@@ -69,6 +69,7 @@ DAILY_HEADERS = [
     *[f"{p}% PE Net" for p in SL_PERCENTAGES],
     *[f"{p}% CE SL" for p in SL_PERCENTAGES],
     *[f"{p}% PE SL" for p in SL_PERCENTAGES],
+    "Entry Quote Request Started At (IST)",
     "Entry Snapshot Retrieved At (IST)",
     "CE LTP Last Trade Time (IST)",
     "PE LTP Last Trade Time (IST)",
@@ -392,6 +393,7 @@ def make_daily_row(run_status):
         for i, p in enumerate(SL_PERCENTAGES)
     )
     values.extend([
+        fmt_time(quote_request_started_at),
         capture_time.strftime("%Y-%m-%d %H:%M:%S"),
         fmt_time(ce_trade_time),
         fmt_time(pe_trade_time),
@@ -605,7 +607,7 @@ with ThreadPoolExecutor(max_workers=2) as pool:
             put_oi = int(chain.get("putOi", 0) or 0)
             pcr, market_bias = daily_bias(put_oi, call_oi)
             oi_retrieved_at = now_ist()
-            oi_snapshot_status = "09:30 REFRESH"
+            oi_snapshot_status = "CAPTURE-TIME REFRESH" if TEST_MODE else "09:30 REFRESH"
         else:
             oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
             print("OI refresh warning; using pre-entry snapshot")
@@ -633,7 +635,7 @@ quote_ages = [
     if stamp is not None
 ]
 entry_data_status = (
-    "FRESH" if len(quote_ages) == 2 and max(quote_ages) <= 60
+    "FRESH" if len(quote_ages) == 2 and max(quote_ages) <= 10
     else "CHECK LTP AGE"
 )
 current_atm = nearest_atm(nifty_spot)
