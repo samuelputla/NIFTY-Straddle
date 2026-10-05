@@ -1,57 +1,39 @@
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
-import os
 import json
-import time as time_module
+import os
+import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+import time as time_module
+
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# Paper monitoring only. This program intentionally contains no order API calls.
 CLIENT_ID = "M2DACFCYUO-100"
 ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 SPREADSHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
-SHEET_NAME = "Sheet1"
 
 IST = ZoneInfo("Asia/Kolkata")
-TARGET_TIME = time(9, 30, 0)
-EXIT_TIME = time(15, 0, 0)
+TARGET_TIME = time(9, 30)
+EXIT_TIME = time(15, 0)
+SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
+CONTRACT_QTY = 65
+ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
-
-# Manual workflow test can set TEST_MODE=true and MONITOR_MINUTES=2.
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
-MONITOR_MINUTES = int(os.getenv("MONITOR_MINUTES", "2"))
-RUN_TYPE = "MANUAL TEST" if TEST_MODE else "LIVE PAPER"
-
-if not ACCESS_TOKEN:
-    raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
-if not GOOGLE_SERVICE_ACCOUNT_JSON:
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set")
-
-# ============================================================
-# GOOGLE SHEETS
-# ============================================================
-GOOGLE_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-credentials = Credentials.from_service_account_info(
-    json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-    scopes=GOOGLE_SCOPES,
-)
-gc = gspread.authorize(credentials)
-spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-
-# Keep the existing Sheet1 history intact. Each stop-loss scenario is written
-# as its own row in a dedicated worksheet.
 SCENARIO_SHEET_NAME = "SL_Scenarios"
+DAILY_SHEET_NAME = "Daily_Summary"
+
+TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
+SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
+MONITOR_MINUTES = max(1, int(os.getenv("MONITOR_MINUTES", "2")))
+RUN_TYPE = "MANUAL TEST" if TEST_MODE else "SCHEDULED PAPER"
+
 SCENARIO_HEADERS = [
     "Date", "Entry Time", "NIFTY Spot", "India VIX", "ATM", "Expiry", "SL %",
     "CE Symbol", "PE Symbol", "CE Entry", "CE Stop Price", "CE SL Hit",
@@ -60,32 +42,111 @@ SCENARIO_HEADERS = [
     "PE Exit Time", "PE Exit Reason", "PE P&L", "Total P&L", "Status",
     "Last Update", "Run Type",
 ]
+DAILY_HEADERS = [
+    "Date",
+    "Vix at 09:30",
+    "Prev. Day High",
+    "Prev. Day Low",
+    "Prev. Day Closing",
+    "Day Opening",
+    "Gap Up/Gap Down",
+    "CE OI",
+    "PE OI",
+    "PE/CE",
+    "Market Bias",
+    "Strike",
+    "Expiry",
+    "CE Entry Price",
+    "PE Entry Price",
+    "Day CE High Premium",
+    "Day CE Low Premium",
+    "Day PE High Premium",
+    "Day PE Low Premium",
+    "CE Exit Price",
+    "PE Exit Price",
+    *[f"{p}% Profit" for p in SL_PERCENTAGES],
+    *[f"{p}% CE Net" for p in SL_PERCENTAGES],
+    *[f"{p}% PE Net" for p in SL_PERCENTAGES],
+    *[f"{p}% CE SL" for p in SL_PERCENTAGES],
+    *[f"{p}% PE SL" for p in SL_PERCENTAGES],
+    "Entry Quote Request Started At (IST)",
+    "Entry Snapshot Retrieved At (IST)",
+    "CE LTP Last Trade Time (IST)",
+    "PE LTP Last Trade Time (IST)",
+    "OI Snapshot Retrieved At (IST)",
+    "OI Snapshot Status",
+    "OI Strike Scope",
+    "Entry Data Status",
+    "Run Status",
+]
 
-worksheet_titles = {worksheet.title for worksheet in spreadsheet.worksheets()}
-if SCENARIO_SHEET_NAME in worksheet_titles:
-    scenario_sheet = spreadsheet.worksheet(SCENARIO_SHEET_NAME)
-else:
-    scenario_sheet = spreadsheet.add_worksheet(
-        title=SCENARIO_SHEET_NAME,
-        rows=1000,
-        cols=len(SCENARIO_HEADERS),
-    )
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+if not GOOGLE_SERVICE_ACCOUNT_JSON:
+    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set")
 
-current_scenario_headers = scenario_sheet.row_values(1)
-if not current_scenario_headers:
-    scenario_sheet.update(
-        range_name="A1:AC1",
-        values=[SCENARIO_HEADERS],
-        value_input_option="RAW",
-    )
-elif current_scenario_headers[:len(SCENARIO_HEADERS)] != SCENARIO_HEADERS:
-    raise RuntimeError(
-        f"Unexpected headers in {SCENARIO_SHEET_NAME}; refusing to overwrite them"
-    )
+credentials = Credentials.from_service_account_info(
+    json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+    scopes=GOOGLE_SCOPES,
+)
+gc = gspread.authorize(credentials)
+spreadsheet = gc.open_by_key(SPREADSHEET_ID)
 
-# ============================================================
-# FYERS REST CLIENT
-# ============================================================
+
+def ensure_worksheet(title, headers, rows=1000):
+    titles = {item.title for item in spreadsheet.worksheets()}
+    if title in titles:
+        sheet = spreadsheet.worksheet(title)
+    else:
+        sheet = spreadsheet.add_worksheet(
+            title=title,
+            rows=rows,
+            cols=len(headers),
+        )
+
+    existing_headers = sheet.row_values(1)
+    if not existing_headers:
+        last_col = column_letter(len(headers))
+        sheet.update(
+            range_name=f"A1:{last_col}1",
+            values=[headers],
+            value_input_option="RAW",
+        )
+    elif existing_headers[:len(headers)] != headers:
+        raise RuntimeError(
+            f"Unexpected headers in {title}; refusing to change existing data"
+        )
+    return sheet
+
+
+def column_letter(number):
+    result = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+scenario_sheet = ensure_worksheet(
+    SCENARIO_SHEET_NAME,
+    SCENARIO_HEADERS,
+    rows=1000,
+)
+daily_sheet = ensure_worksheet(
+    DAILY_SHEET_NAME,
+    DAILY_HEADERS,
+    rows=1000,
+)
+
+if SETUP_ONLY:
+    print(f"Google Sheets tabs ready: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
+    sys.exit(0)
+
+if not ACCESS_TOKEN:
+    raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
+
 fyers = fyersModel.FyersModel(
     client_id=CLIENT_ID,
     token=ACCESS_TOKEN,
@@ -93,15 +154,108 @@ fyers = fyersModel.FyersModel(
     log_path="",
 )
 
-# ============================================================
-# HELPERS
-# ============================================================
+
 def now_ist():
     return datetime.now(IST)
 
 
-def fmt_time(dt):
-    return dt.strftime("%H:%M:%S")
+def fmt_time(value):
+    return value.strftime("%H:%M:%S") if value else ""
+
+
+def market_timestamp(value):
+    """Convert FYERS quote 'tt' epoch seconds/milliseconds to India time."""
+    if value in (None, ""):
+        return None
+    try:
+        epoch = float(value)
+        if epoch > 10_000_000_000:
+            epoch /= 1000
+        return datetime.fromtimestamp(epoch, IST)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def get_quotes(symbols):
+    response = fyers.quotes({"symbols": ",".join(symbols)})
+    if response.get("s") != "ok":
+        raise RuntimeError(f"Quotes failed for {symbols}: {response}")
+    result = {}
+    for item in response.get("d", []):
+        values = item.get("v", {})
+        symbol = item.get("n") or values.get("symbol")
+        if not symbol:
+            continue
+        result[symbol] = values
+    missing = [symbol for symbol in symbols if symbol not in result]
+    if missing:
+        raise RuntimeError(f"Quotes missing symbols: {missing}; response={response}")
+    return result
+
+
+def ltp_from_quote(values, label):
+    try:
+        return float(values["lp"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid {label} LTP in quote: {values}") from exc
+
+
+def get_previous_day_ohlc(today):
+    start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
+    end = today.strftime("%Y-%m-%d")
+    response = fyers.history({
+        "symbol": NIFTY_SYMBOL,
+        "resolution": "D",
+        "date_format": "1",
+        "range_from": start,
+        "range_to": end,
+        "cont_flag": "1",
+    })
+    if response.get("s") != "ok":
+        raise RuntimeError(f"NIFTY daily history failed: {response}")
+
+    prior = []
+    for candle in response.get("candles", []):
+        if len(candle) < 5:
+            continue
+        candle_date = datetime.fromtimestamp(float(candle[0]), IST).date()
+        if candle_date < today:
+            prior.append((candle_date, candle))
+
+    if not prior:
+        raise RuntimeError("No previous trading-day NIFTY candle was returned")
+
+    _, candle = max(prior, key=lambda item: item[0])
+    return {
+        "date": datetime.fromtimestamp(float(candle[0]), IST).date(),
+        "high": float(candle[2]),
+        "low": float(candle[3]),
+        "close": float(candle[4]),
+    }
+
+
+def nearest_atm(spot):
+    return int((spot + 25) // 50) * 50
+
+
+def get_atm_options(chain_response, atm):
+    chain = chain_response["data"]
+    expiries = chain.get("expiryData", [])
+    if not expiries:
+        raise RuntimeError("No expiry data returned by FYERS")
+    expiry = expiries[0]
+
+    ce = pe = None
+    for option in chain.get("optionsChain", []):
+        if option.get("strike_price") != atm:
+            continue
+        if option.get("option_type") == "CE":
+            ce = option
+        elif option.get("option_type") == "PE":
+            pe = option
+    if ce is None or pe is None:
+        raise RuntimeError(f"ATM CE/PE contracts not found for strike {atm}")
+    return chain, expiry, ce, pe
 
 
 def make_scenario_row(percent):
@@ -109,12 +263,10 @@ def make_scenario_row(percent):
     index = SL_PERCENTAGES.index(percent)
     ce_exit = scenario["ce_exit"]
     pe_exit = scenario["pe_exit"]
-    ce_pnl = round(ce_entry - ce_exit, 2) if ce_exit is not None else ""
-    pe_pnl = round(pe_entry - pe_exit, 2) if pe_exit is not None else ""
-    total_pnl = round(ce_pnl + pe_pnl, 2) if ce_pnl != "" and pe_pnl != "" else ""
-    status = "TEST COMPLETE" if state["complete"] and TEST_MODE else (
-        "COMPLETED" if state["complete"] else "RUNNING"
-    )
+    ce_net = round(ce_entry - ce_exit, 2) if ce_exit is not None else ""
+    pe_net = round(pe_entry - pe_exit, 2) if pe_exit is not None else ""
+    total_net = round(ce_net + pe_net, 2) if ce_net != "" and pe_net != "" else ""
+    status = "COMPLETED" if state["complete"] else "RUNNING"
     return [
         capture_time.strftime("%Y-%m-%d"),
         capture_time.strftime("%H:%M:%S"),
@@ -128,36 +280,24 @@ def make_scenario_row(percent):
         round(ce_entry, 2),
         ce_sl_values[index],
         "HIT" if scenario["ce_hit"] else "NOT HIT",
-        fmt_time(scenario["ce_hit_time"]) if scenario["ce_hit_time"] else "",
+        fmt_time(scenario["ce_hit_time"]),
         round(ce_exit, 2) if ce_exit is not None else "",
-        fmt_time(scenario["ce_exit_time"]) if scenario["ce_exit_time"] else "",
+        fmt_time(scenario["ce_exit_time"]),
         scenario["ce_exit_reason"],
-        ce_pnl,
+        ce_net,
         round(pe_entry, 2),
         pe_sl_values[index],
         "HIT" if scenario["pe_hit"] else "NOT HIT",
-        fmt_time(scenario["pe_hit_time"]) if scenario["pe_hit_time"] else "",
+        fmt_time(scenario["pe_hit_time"]),
         round(pe_exit, 2) if pe_exit is not None else "",
-        fmt_time(scenario["pe_exit_time"]) if scenario["pe_exit_time"] else "",
+        fmt_time(scenario["pe_exit_time"]),
         scenario["pe_exit_reason"],
-        pe_pnl,
-        total_pnl,
+        pe_net,
+        total_net,
         status,
         fmt_time(now_ist()),
         RUN_TYPE,
     ]
-
-
-def update_scenario_rows(percentages):
-    updates = []
-    for percent in sorted(set(percentages)):
-        row_number = scenario_row_numbers[percent]
-        updates.append({
-            "range": f"A{row_number}:AC{row_number}",
-            "values": [make_scenario_row(percent)],
-        })
-    if updates:
-        scenario_sheet.batch_update(updates, value_input_option="RAW")
 
 
 def append_scenario_rows(rows):
@@ -172,159 +312,175 @@ def append_scenario_rows(rows):
     return first_row
 
 
-def get_quote(symbol):
-    response = fyers.quotes({"symbols": symbol})
-    if response.get("s") != "ok":
-        raise RuntimeError(f"Quote failed for {symbol}: {response}")
-    return float(response["d"][0]["v"]["lp"])
+def update_scenario_rows(percentages):
+    updates = []
+    for percent in sorted(set(percentages)):
+        row_number = scenario_row_numbers[percent]
+        updates.append({
+            "range": f"A{row_number}:AC{row_number}",
+            "values": [make_scenario_row(percent)],
+        })
+    if updates:
+        scenario_sheet.batch_update(updates, value_input_option="RAW")
 
 
-# ============================================================
-# ENTRY TIMING
-# ============================================================
-print("\n=================================================")
-print("NIFTY SHORT STRADDLE - PAPER FORWARD TEST")
-print("=================================================")
-print(f"Mode         : {RUN_TYPE}")
-print("Entry        : 09:30 IST")
-print("Exit         : 15:00 IST")
-print("Live feed    : FYERS WebSocket SymbolUpdate")
-print("Stop levels  : 10%, 15%, 20%, 25%, 30%, 35%, 40%")
-print("=================================================")
+def daily_bias(put_oi, call_oi):
+    if not call_oi:
+        return "", "N/A"
+    ratio = round(put_oi / call_oi, 4)
+    # Preserve the user's requested custom label convention.
+    bias = "Bearish" if ratio < 1 else "Bullish" if ratio > 1 else "Neutral"
+    return ratio, bias
 
-if not TEST_MODE:
-    print("Waiting for 09:30 IST...")
-    while now_ist().time() < TARGET_TIME:
-        time_module.sleep(1)
-else:
-    print("TEST MODE: capturing immediately and monitoring briefly.")
 
-capture_time = now_ist()
+def sl_cell(scenario, leg, stop_price):
+    if scenario[f"{leg}_hit"]:
+        hit_time = fmt_time(scenario[f"{leg}_hit_time"])
+        observed = scenario[f"{leg}_trigger_ltp"]
+        return f"HIT @ {stop_price:.2f}; observed {observed:.2f} at {hit_time}"
+    return f"NOT HIT; level {stop_price:.2f}"
 
-# ============================================================
-# CAPTURE ENTRY
-# ============================================================
-nifty_spot = get_quote(NIFTY_SYMBOL)
-india_vix = get_quote(VIX_SYMBOL)
-atm = int((nifty_spot + 25) // 50) * 50
 
-optionchain_response = fyers.optionchain({
-    "symbol": NIFTY_SYMBOL,
-    "strikecount": 5,
-    "timestamp": "",
-})
-if optionchain_response.get("s") != "ok":
-    raise RuntimeError(f"Option chain failed: {optionchain_response}")
+def make_daily_row(run_status):
+    scenario_nets = {}
+    for percent in SL_PERCENTAGES:
+        scenario = state["scenarios"][percent]
+        ce_exit = scenario["ce_exit"]
+        pe_exit = scenario["pe_exit"]
+        ce_net = round(ce_entry - ce_exit, 2) if ce_exit is not None else ""
+        pe_net = round(pe_entry - pe_exit, 2) if pe_exit is not None else ""
+        total = (
+            round((ce_net + pe_net) * CONTRACT_QTY - ROUND_TRIP_CHARGES_RUPEES, 2)
+            if ce_net != "" and pe_net != ""
+            else ""
+        )
+        scenario_nets[percent] = (total, ce_net, pe_net)
 
-chain = optionchain_response["data"]
-expiry_data = chain.get("expiryData", [])
-if not expiry_data:
-    raise RuntimeError("No expiry data returned")
-expiry = expiry_data[0]
+    values = [
+        capture_time.strftime("%Y-%m-%d"),
+        round(india_vix, 2),
+        previous_ohlc["high"],
+        previous_ohlc["low"],
+        previous_ohlc["close"],
+        day_open,
+        gap_text,
+        call_oi,
+        put_oi,
+        pcr,
+        market_bias,
+        atm,
+        expiry["date"],
+        round(ce_entry, 2),
+        round(pe_entry, 2),
+        round(state["ce_high"], 2),
+        round(state["ce_low"], 2),
+        round(state["pe_high"], 2),
+        round(state["pe_low"], 2),
+        round(state["final_ce_ltp"], 2)
+        if state["final_ce_ltp"] is not None else "",
+        round(state["final_pe_ltp"], 2)
+        if state["final_pe_ltp"] is not None else "",
+    ]
+    values.extend(scenario_nets[p][0] for p in SL_PERCENTAGES)
+    values.extend(scenario_nets[p][1] for p in SL_PERCENTAGES)
+    values.extend(scenario_nets[p][2] for p in SL_PERCENTAGES)
+    values.extend(
+        sl_cell(state["scenarios"][p], "ce", ce_sl_values[i])
+        for i, p in enumerate(SL_PERCENTAGES)
+    )
+    values.extend(
+        sl_cell(state["scenarios"][p], "pe", pe_sl_values[i])
+        for i, p in enumerate(SL_PERCENTAGES)
+    )
+    values.extend([
+        fmt_time(quote_request_started_at),
+        capture_time.strftime("%Y-%m-%d %H:%M:%S"),
+        fmt_time(ce_trade_time),
+        fmt_time(pe_trade_time),
+        fmt_time(oi_retrieved_at),
+        oi_snapshot_status,
+        "FYERS option chain aggregate OI for returned strike range",
+        entry_data_status,
+        run_status,
+    ])
+    return values
 
-ce = None
-pe = None
-for option in chain.get("optionsChain", []):
-    if option.get("strike_price") == atm:
-        if option.get("option_type") == "CE":
-            ce = option
-        elif option.get("option_type") == "PE":
-            pe = option
 
-if ce is None or pe is None:
-    raise RuntimeError(f"ATM contracts not found for {atm}")
+def write_daily_row(run_status):
+    last_col = column_letter(len(DAILY_HEADERS))
+    daily_sheet.update(
+        range_name=f"A{daily_row_number}:{last_col}{daily_row_number}",
+        values=[make_daily_row(run_status)],
+        value_input_option="RAW",
+    )
 
-ce_symbol = ce["symbol"]
-pe_symbol = pe["symbol"]
-ce_entry = float(ce["ltp"])
-pe_entry = float(pe["ltp"])
 
-ce_sl_values = [round(ce_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
-pe_sl_values = [round(pe_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
+def create_daily_row_for_today():
+    values = daily_sheet.get_all_values()
+    today_text = now_ist().date().strftime("%Y-%m-%d")
+    for row_number, row in enumerate(values[1:], start=2):
+        if row and row[0] == today_text:
+            raise RuntimeError(
+                f"Daily_Summary already has a row for {today_text}; "
+                "refusing to create a duplicate run"
+            )
+    blank = [""] * len(DAILY_HEADERS)
+    blank[0] = today_text
+    blank[-1] = "MISSED 09:30 CAPTURE"
+    daily_sheet.append_row(blank, value_input_option="RAW")
 
-print("\nENTRY")
-print(f"Time       : {capture_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
-print(f"NIFTY      : {nifty_spot:.2f}")
-print(f"India VIX  : {india_vix:.2f}")
-print(f"ATM        : {atm}")
-print(f"Expiry     : {expiry['date']}")
-print(f"CE         : {ce_symbol} @ {ce_entry:.2f}")
-print(f"PE         : {pe_symbol} @ {pe_entry:.2f}")
 
-# ============================================================
-# INDEPENDENT PAPER SCENARIOS
-# ============================================================
-state = {
-    "ce_ltp": ce_entry,
-    "pe_ltp": pe_entry,
-    "complete": False,
-    "scenarios": {},
-}
-for percent in SL_PERCENTAGES:
-    state["scenarios"][percent] = {
-        "ce_hit": False,
-        "ce_hit_time": None,
-        "ce_exit": None,
-        "ce_exit_time": None,
-        "ce_exit_reason": "",
-        "pe_hit": False,
-        "pe_hit_time": None,
-        "pe_exit": None,
-        "pe_exit_time": None,
-        "pe_exit_reason": "",
-    }
-
-scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
-scenario_first_row = append_scenario_rows(scenario_rows)
-scenario_row_numbers = {
-    percent: scenario_first_row + index
-    for index, percent in enumerate(SL_PERCENTAGES)
-}
-print(f"Google Sheet {SCENARIO_SHEET_NAME} rows: {scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}")
-
-state_lock = threading.Lock()
-stop_event = threading.Event()
-ws_holder = {"socket": None}
+def update_summary_after_event(percentages):
+    if daily_row_number is None:
+        return
+    update_scenario_rows(percentages)
+    write_daily_row("RUNNING")
 
 
 def handle_sl(leg, ltp):
-    """Track each stop percentage independently for the specified option leg."""
     leg_key = "ce" if leg == "CE" else "pe"
-    sl_values = ce_sl_values if leg_key == "ce" else pe_sl_values
-    changed_percentages = []
-    observed_at = now_ist()
+    if stop_event.is_set():
+        return
 
+    observed_at = now_ist()
+    sl_values = ce_sl_values if leg_key == "ce" else pe_sl_values
+    changed = []
     with state_lock:
         state[f"{leg_key}_ltp"] = ltp
+        high_key = f"{leg_key}_high"
+        low_key = f"{leg_key}_low"
+        state[high_key] = max(state[high_key], ltp)
+        state[low_key] = min(state[low_key], ltp)
+
         for percent, stop_price in zip(SL_PERCENTAGES, sl_values):
             scenario = state["scenarios"][percent]
             hit_key = f"{leg_key}_hit"
             if not scenario[hit_key] and ltp >= stop_price:
                 scenario[hit_key] = True
                 scenario[f"{leg_key}_hit_time"] = observed_at
-                scenario[f"{leg_key}_exit"] = ltp
+                # Paper fills use the stop threshold, per the user's example.
+                # The observed crossing tick remains logged separately.
+                scenario[f"{leg_key}_exit"] = stop_price
+                scenario[f"{leg_key}_trigger_ltp"] = ltp
                 scenario[f"{leg_key}_exit_time"] = observed_at
                 scenario[f"{leg_key}_exit_reason"] = "STOP LOSS"
-                changed_percentages.append(percent)
+                changed.append(percent)
 
-    if changed_percentages:
-        levels_text = ", ".join(f"{percent}%" for percent in changed_percentages)
-        print(f"\n🚨 {leg} stop scenario(s) hit: {levels_text} @ {ltp:.2f}")
-        update_scenario_rows(changed_percentages)
+    if changed:
+        levels = ", ".join(f"{p}%" for p in changed)
+        print(f"\n{leg} stop scenario(s) hit: {levels} @ {ltp:.2f}")
+        update_summary_after_event(changed)
 
 
 def on_message(message):
     if stop_event.is_set():
         return
     symbol = message.get("symbol", "")
-    ltp_raw = message.get("ltp")
-    if ltp_raw in (None, ""):
-        return
+    raw_ltp = message.get("ltp")
     try:
-        ltp = float(ltp_raw)
+        ltp = float(raw_ltp)
     except (TypeError, ValueError):
         return
-
     if symbol == ce_symbol:
         handle_sl("CE", ltp)
     elif symbol == pe_symbol:
@@ -340,8 +496,8 @@ def on_close(message):
 
 
 def on_open():
-    print("\n✅ WebSocket connected")
-    print(f"Monitoring: {ce_symbol} + {pe_symbol}")
+    print("\nWebSocket connected")
+    print(f"Monitoring paper prices: {ce_symbol} + {pe_symbol}")
     ws_holder["socket"].subscribe(
         symbols=[ce_symbol, pe_symbol],
         data_type="SymbolUpdate",
@@ -363,21 +519,228 @@ def close_at_end(end_dt):
                 except Exception as exc:
                     print("Socket close warning:", exc)
             return
-        time_module.sleep(1)
+        time_module.sleep(0.25)
 
 
-if TEST_MODE:
-    monitor_end = now_ist() + timedelta(minutes=max(1, MONITOR_MINUTES))
+# ============================================================
+# PREPARE CONTRACTS BEFORE 09:30, THEN CAPTURE ENTRY QUOTES
+# ============================================================
+today = now_ist().date()
+previous_ohlc = get_previous_day_ohlc(today)
+target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
+prep_dt = target_dt - timedelta(seconds=20)
+
+if not TEST_MODE:
+    print("Preparing NIFTY/VIX and option contracts before 09:30 IST...")
+    while now_ist() < prep_dt:
+        time_module.sleep(0.25)
 else:
-    today = now_ist().date()
-    monitor_end = datetime.combine(today, EXIT_TIME, tzinfo=IST)
+    print("TEST MODE: preparing and capturing immediately.")
+
+# Preselect ATM and expiry before the entry time so the 09:30 request is one
+# batched quote for NIFTY, VIX, CE, and PE instead of sequential API calls.
+preselection_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL])
+preselection_received_at = now_ist()
+preselection_nifty = ltp_from_quote(preselection_snapshot[NIFTY_SYMBOL], "NIFTY")
+atm = nearest_atm(preselection_nifty)
+
+optionchain_response = fyers.optionchain({
+    "symbol": NIFTY_SYMBOL,
+    "strikecount": 50,
+    "timestamp": "",
+})
+if optionchain_response.get("s") != "ok":
+    raise RuntimeError(f"Option chain failed: {optionchain_response}")
+
+chain, expiry, ce, pe = get_atm_options(optionchain_response, atm)
+ce_symbol = ce["symbol"]
+pe_symbol = pe["symbol"]
+oi_retrieved_at = now_ist()
+oi_snapshot_status = "PRE-ENTRY CONTRACT-SELECTION SNAPSHOT"
+call_oi = int(chain.get("callOi", 0) or 0)
+put_oi = int(chain.get("putOi", 0) or 0)
+pcr, market_bias = daily_bias(put_oi, call_oi)
+
+if not TEST_MODE:
+    print("Waiting for the 09:30 IST entry quote...")
+    while now_ist() < target_dt:
+        time_module.sleep(0.05)
+    quote_request_started_at = now_ist()
+    late_seconds = (quote_request_started_at - target_dt).total_seconds()
+    if late_seconds > 5:
+        create_daily_row_for_today()
+        raise RuntimeError(
+            f"Missed 09:30 entry quote: request could start only at "
+            f"{quote_request_started_at.strftime('%H:%M:%S')} IST"
+        )
+else:
+    quote_request_started_at = now_ist()
+
+def refresh_optionchain_for_oi():
+    # Use a separate client because this request runs alongside the 09:30 quote batch.
+    oi_client = fyersModel.FyersModel(
+        client_id=CLIENT_ID,
+        token=ACCESS_TOKEN,
+        is_async=False,
+        log_path="",
+    )
+    return oi_client.optionchain({
+        "symbol": NIFTY_SYMBOL,
+        "strikecount": 50,
+        "timestamp": "",
+    })
+
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    quote_future = pool.submit(
+        get_quotes,
+        [NIFTY_SYMBOL, VIX_SYMBOL, ce_symbol, pe_symbol],
+    )
+    oi_future = pool.submit(refresh_optionchain_for_oi)
+    entry_snapshot = quote_future.result()
+    capture_time = now_ist()
+    try:
+        refreshed_chain_response = oi_future.result(timeout=10)
+        if refreshed_chain_response.get("s") == "ok":
+            chain = refreshed_chain_response["data"]
+            call_oi = int(chain.get("callOi", 0) or 0)
+            put_oi = int(chain.get("putOi", 0) or 0)
+            pcr, market_bias = daily_bias(put_oi, call_oi)
+            oi_retrieved_at = now_ist()
+            oi_snapshot_status = "CAPTURE-TIME REFRESH" if TEST_MODE else "09:30 REFRESH"
+        else:
+            oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
+            print("OI refresh warning; using pre-entry snapshot")
+    except Exception as exc:
+        oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
+        print("OI refresh warning; using pre-entry snapshot:", exc)
+
+nifty_values = entry_snapshot[NIFTY_SYMBOL]
+vix_values = entry_snapshot[VIX_SYMBOL]
+ce_values = entry_snapshot[ce_symbol]
+pe_values = entry_snapshot[pe_symbol]
+nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
+india_vix = ltp_from_quote(vix_values, "India VIX")
+day_open = float(nifty_values.get("open_price", 0) or 0)
+if day_open <= 0:
+    raise RuntimeError(f"FYERS quote did not include a valid NIFTY day open: {nifty_values}")
+
+ce_entry = ltp_from_quote(ce_values, "CE")
+pe_entry = ltp_from_quote(pe_values, "PE")
+ce_trade_time = market_timestamp(ce_values.get("tt"))
+pe_trade_time = market_timestamp(pe_values.get("tt"))
+quote_ages = [
+    (capture_time - stamp).total_seconds()
+    for stamp in (ce_trade_time, pe_trade_time)
+    if stamp is not None
+]
+entry_data_status = (
+    "FRESH" if len(quote_ages) == 2 and max(quote_ages) <= 10
+    else "CHECK LTP AGE"
+)
+current_atm = nearest_atm(nifty_spot)
+if current_atm != atm:
+    entry_data_status = f"ATM SHIFT: selected {atm}, current spot maps to {current_atm}"
+
+gap_text = (
+    "Gap Up" if day_open > previous_ohlc["close"]
+    else "Gap Down" if day_open < previous_ohlc["close"]
+    else "Flat"
+)
+
+ce_sl_values = [round(ce_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
+pe_sl_values = [round(pe_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
+
+print("\n=================================================")
+print("NIFTY SHORT STRADDLE - PAPER FORWARD TEST")
+print("=================================================")
+print(f"Mode                   : {RUN_TYPE}")
+print("Target entry           : 09:30 IST")
+print(f"Entry snapshot received: {capture_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
+print(f"NIFTY                  : {nifty_spot:.2f}")
+print(f"India VIX              : {india_vix:.2f}")
+print(f"ATM / expiry           : {atm} / {expiry['date']}")
+print(f"CE                     : {ce_symbol} @ {ce_entry:.2f}")
+print(f"PE                     : {pe_symbol} @ {pe_entry:.2f}")
+print(f"CE last trade time     : {fmt_time(ce_trade_time)}")
+print(f"PE last trade time     : {fmt_time(pe_trade_time)}")
+print(f"Entry data status      : {entry_data_status}")
+print(f"OI PCR / custom bias   : {pcr} / {market_bias}")
+print("=================================================")
 
 # ============================================================
-# START WEBSOCKET
+# CREATE THE DAILY SUMMARY ROW AND THE SEVEN PARALLEL SCENARIOS
 # ============================================================
-TOKEN = f"{CLIENT_ID}:{ACCESS_TOKEN}"
+daily_row_number = None
+if not TEST_MODE:
+    summary_rows = daily_sheet.get_all_values()
+    today_text = capture_time.date().strftime("%Y-%m-%d")
+    for row_number, row in enumerate(summary_rows[1:], start=2):
+        if row and row[0] == today_text:
+            raise RuntimeError(
+                f"Daily_Summary already has a row for {today_text}; "
+                "refusing to duplicate the day's straddle"
+            )
+    daily_row_number = len(summary_rows) + 1
+
+state = {
+    "ce_ltp": ce_entry,
+    "pe_ltp": pe_entry,
+    "ce_high": ce_entry,
+    "ce_low": ce_entry,
+    "pe_high": pe_entry,
+    "pe_low": pe_entry,
+    "complete": False,
+    "final_ce_ltp": None,
+    "final_pe_ltp": None,
+    "scenarios": {},
+}
+for percent in SL_PERCENTAGES:
+    state["scenarios"][percent] = {
+        "ce_hit": False,
+        "ce_hit_time": None,
+        "ce_trigger_ltp": None,
+        "ce_exit": None,
+        "ce_exit_time": None,
+        "ce_exit_reason": "",
+        "pe_hit": False,
+        "pe_hit_time": None,
+        "pe_trigger_ltp": None,
+        "pe_exit": None,
+        "pe_exit_time": None,
+        "pe_exit_reason": "",
+    }
+
+# Store trigger LTP values in the scenario state through the keys used above.
+# This also keeps per-leg stop tracking independent for all seven percentages.
+for scenario in state["scenarios"].values():
+    scenario["ce_trigger_ltp"] = None
+    scenario["pe_trigger_ltp"] = None
+
+scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
+scenario_first_row = append_scenario_rows(scenario_rows)
+scenario_row_numbers = {
+    percent: scenario_first_row + index
+    for index, percent in enumerate(SL_PERCENTAGES)
+}
+print(
+    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
+    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
+)
+
+state_lock = threading.Lock()
+stop_event = threading.Event()
+ws_holder = {"socket": None}
+if not TEST_MODE:
+    target_end = datetime.combine(capture_time.date(), EXIT_TIME, tzinfo=IST)
+else:
+    target_end = now_ist() + timedelta(minutes=MONITOR_MINUTES)
+
+if daily_row_number is not None:
+    write_daily_row("RUNNING")
+
 ws = data_ws.FyersDataSocket(
-    access_token=TOKEN,
+    access_token=f"{CLIENT_ID}:{ACCESS_TOKEN}",
     log_path="",
     litemode=True,
     write_to_file=False,
@@ -388,57 +751,72 @@ ws = data_ws.FyersDataSocket(
     on_message=on_message,
 )
 ws_holder["socket"] = ws
-
-threading.Thread(target=close_at_end, args=(monitor_end,), daemon=True).start()
+threading.Thread(target=close_at_end, args=(target_end,), daemon=True).start()
 
 print("\nConnecting to FYERS live feed...")
 ws.connect()
 
-# ============================================================
-# FINALIZE EACH PAPER SCENARIO
-# ============================================================
-# Every unhit leg/scenario exits independently at the 15:00 or test-end quote.
-final_ce_ltp = state["ce_ltp"]
-final_pe_ltp = state["pe_ltp"]
-try:
-    final_ce_ltp = get_quote(ce_symbol)
-except Exception as exc:
-    print("CE final quote warning; using last WebSocket price:", exc)
-try:
-    final_pe_ltp = get_quote(pe_symbol)
-except Exception as exc:
-    print("PE final quote warning; using last WebSocket price:", exc)
+# FyersDataSocket.connect() can return after opening the socket. Do not finalize
+# until the separate deadline thread signals the 15:00 (or test-end) stop.
+while not stop_event.wait(timeout=0.5):
+    pass
 
-final_time = now_ist()
+# Pull one batched closing quote after the monitor has stopped; if the REST
+# snapshot fails, use the final WebSocket LTP received before the deadline.
+try:
+    closing_snapshot = get_quotes([ce_symbol, pe_symbol])
+    exit_snapshot_received_at = now_ist()
+    final_ce_ltp = ltp_from_quote(closing_snapshot[ce_symbol], "final CE")
+    final_pe_ltp = ltp_from_quote(closing_snapshot[pe_symbol], "final PE")
+    final_ce_time = market_timestamp(closing_snapshot[ce_symbol].get("tt"))
+    final_pe_time = market_timestamp(closing_snapshot[pe_symbol].get("tt"))
+except Exception as exc:
+    print("Closing quote warning; using last WebSocket prices:", exc)
+    exit_snapshot_received_at = now_ist()
+    final_ce_ltp = state["ce_ltp"]
+    final_pe_ltp = state["pe_ltp"]
+    final_ce_time = exit_snapshot_received_at
+    final_pe_time = exit_snapshot_received_at
+
+state["final_ce_ltp"] = final_ce_ltp
+state["final_pe_ltp"] = final_pe_ltp
 final_reason = "TEST END" if TEST_MODE else "15:00 EXIT"
 with state_lock:
     for percent in SL_PERCENTAGES:
         scenario = state["scenarios"][percent]
         if scenario["ce_exit"] is None:
             scenario["ce_exit"] = final_ce_ltp
-            scenario["ce_exit_time"] = final_time
+            scenario["ce_exit_time"] = final_ce_time or exit_snapshot_received_at
             scenario["ce_exit_reason"] = final_reason
         if scenario["pe_exit"] is None:
             scenario["pe_exit"] = final_pe_ltp
-            scenario["pe_exit_time"] = final_time
+            scenario["pe_exit_time"] = final_pe_time or exit_snapshot_received_at
             scenario["pe_exit_reason"] = final_reason
     state["complete"] = True
-    update_scenario_rows(SL_PERCENTAGES)
+
+update_scenario_rows(SL_PERCENTAGES)
+if daily_row_number is not None:
+    write_daily_row("COMPLETED")
 
 print("\n=================================================")
 print("FINAL PAPER RESULTS BY STOP-LOSS SCENARIO")
 print("=================================================")
 for percent in SL_PERCENTAGES:
     scenario = state["scenarios"][percent]
-    ce_pnl = round(ce_entry - scenario["ce_exit"], 2)
-    pe_pnl = round(pe_entry - scenario["pe_exit"], 2)
-    total_pnl = round(ce_pnl + pe_pnl, 2)
+    ce_net = round(ce_entry - scenario["ce_exit"], 2)
+    pe_net = round(pe_entry - scenario["pe_exit"], 2)
+    total_net = round(
+        (ce_net + pe_net) * CONTRACT_QTY - ROUND_TRIP_CHARGES_RUPEES,
+        2,
+    )
     print(
         f"{percent:>2}% SL | "
         f"CE exit {scenario['ce_exit']:.2f} ({scenario['ce_exit_reason']}) "
-        f"P&L {ce_pnl:.2f} | "
+        f"per-unit P&L {ce_net:.2f} | "
         f"PE exit {scenario['pe_exit']:.2f} ({scenario['pe_exit_reason']}) "
-        f"P&L {pe_pnl:.2f} | Total {total_pnl:.2f}"
+        f"per-unit P&L {pe_net:.2f} | "
+        f"Net {total_net:.2f} after qty {CONTRACT_QTY} and charges "
+        f"Rs {ROUND_TRIP_CHARGES_RUPEES}"
     )
-print(f"Google Sheet tab: {SCENARIO_SHEET_NAME}")
-print("=================================================")
+print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
+print("Paper monitoring only; no order was placed.")
