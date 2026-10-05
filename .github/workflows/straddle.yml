@@ -8,9 +8,15 @@ on:
         required: false
         type: boolean
         default: false
+      setup_only:
+        description: "Create or verify Google Sheets tabs and headers without contacting FYERS"
+        required: false
+        type: boolean
+        default: false
   schedule:
-    # GitHub cron is UTC. 04:00 UTC = 09:30 IST.
-    - cron: "0 4 * * 1-5"
+    # Start before the hour's peak queue and prepare contracts before the 09:30 quote request.
+    - cron: "55 8 * * 1-5"
+      timezone: "Asia/Kolkata"
 
 concurrency:
   group: nifty-straddle-paper-test
@@ -25,6 +31,7 @@ jobs:
       FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       TEST_MODE: ${{ inputs.test_mode || 'false' }}
+      SETUP_ONLY: ${{ inputs.setup_only || 'false' }}
       MONITOR_MINUTES: "2"
 
     steps:
