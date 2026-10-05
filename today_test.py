@@ -373,10 +373,10 @@ def make_daily_row(run_status):
         round(state["ce_low"], 2),
         round(state["pe_high"], 2),
         round(state["pe_low"], 2),
-        round(state["scenarios"][10]["ce_exit"], 2)
-        if state["scenarios"][10]["ce_exit"] is not None else "",
-        round(state["scenarios"][10]["pe_exit"], 2)
-        if state["scenarios"][10]["pe_exit"] is not None else "",
+        round(state["final_ce_ltp"], 2)
+        if state["final_ce_ltp"] is not None else "",
+        round(state["final_pe_ltp"], 2)
+        if state["final_pe_ltp"] is not None else "",
     ]
     values.extend(scenario_nets[p][0] for p in SL_PERCENTAGES)
     values.extend(scenario_nets[p][1] for p in SL_PERCENTAGES)
@@ -518,40 +518,27 @@ def close_at_end(end_dt):
 
 
 # ============================================================
-# INITIALIZE HISTORY, THEN WAIT FOR THE TARGET ENTRY TIME
+# PREPARE CONTRACTS BEFORE 09:30, THEN CAPTURE ENTRY QUOTES
 # ============================================================
 today = now_ist().date()
 previous_ohlc = get_previous_day_ohlc(today)
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
+prep_dt = target_dt - timedelta(seconds=20)
 
 if not TEST_MODE:
-    print("Waiting for 09:30 IST entry...")
-    while now_ist() < target_dt:
+    print("Preparing NIFTY/VIX and option contracts before 09:30 IST...")
+    while now_ist() < prep_dt:
         time_module.sleep(0.25)
-    start_time = now_ist()
-    late_seconds = (start_time - target_dt).total_seconds()
-    if late_seconds > 5:
-        create_daily_row_for_today()
-        raise RuntimeError(
-            f"Missed 09:30 entry: runner became available at "
-            f"{start_time.strftime('%H:%M:%S')} IST"
-        )
 else:
-    print("TEST MODE: capturing immediately and monitoring briefly.")
+    print("TEST MODE: preparing and capturing immediately.")
 
-# Batch-fetch NIFTY and VIX, then the selected CE/PE prices in a second
-# batched Quotes request. Log FYERS last-trade times beside local receipt time.
-underlying_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL])
-underlying_received_at = now_ist()
-nifty_values = underlying_snapshot[NIFTY_SYMBOL]
-vix_values = underlying_snapshot[VIX_SYMBOL]
-nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
-india_vix = ltp_from_quote(vix_values, "India VIX")
-day_open = float(nifty_values.get("open_price", 0) or 0)
-if day_open <= 0:
-    raise RuntimeError(f"FYERS quote did not include a valid NIFTY day open: {nifty_values}")
+# Preselect ATM and expiry before the entry time so the 09:30 request is one
+# batched quote for NIFTY, VIX, CE, and PE instead of sequential API calls.
+preselection_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL])
+preselection_received_at = now_ist()
+preselection_nifty = ltp_from_quote(preselection_snapshot[NIFTY_SYMBOL], "NIFTY")
+atm = nearest_atm(preselection_nifty)
 
-atm = nearest_atm(nifty_spot)
 optionchain_response = fyers.optionchain({
     "symbol": NIFTY_SYMBOL,
     "strikecount": 50,
@@ -568,10 +555,33 @@ call_oi = int(chain.get("callOi", 0) or 0)
 put_oi = int(chain.get("putOi", 0) or 0)
 pcr, market_bias = daily_bias(put_oi, call_oi)
 
-option_snapshot = get_quotes([ce_symbol, pe_symbol])
+if not TEST_MODE:
+    print("Waiting for the 09:30 IST entry quote...")
+    while now_ist() < target_dt:
+        time_module.sleep(0.05)
+    quote_request_started_at = now_ist()
+    late_seconds = (quote_request_started_at - target_dt).total_seconds()
+    if late_seconds > 5:
+        create_daily_row_for_today()
+        raise RuntimeError(
+            f"Missed 09:30 entry quote: request could start only at "
+            f"{quote_request_started_at.strftime('%H:%M:%S')} IST"
+        )
+else:
+    quote_request_started_at = now_ist()
+
+entry_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL, ce_symbol, pe_symbol])
 capture_time = now_ist()
-ce_values = option_snapshot[ce_symbol]
-pe_values = option_snapshot[pe_symbol]
+nifty_values = entry_snapshot[NIFTY_SYMBOL]
+vix_values = entry_snapshot[VIX_SYMBOL]
+ce_values = entry_snapshot[ce_symbol]
+pe_values = entry_snapshot[pe_symbol]
+nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
+india_vix = ltp_from_quote(vix_values, "India VIX")
+day_open = float(nifty_values.get("open_price", 0) or 0)
+if day_open <= 0:
+    raise RuntimeError(f"FYERS quote did not include a valid NIFTY day open: {nifty_values}")
+
 ce_entry = ltp_from_quote(ce_values, "CE")
 pe_entry = ltp_from_quote(pe_values, "PE")
 ce_trade_time = market_timestamp(ce_values.get("tt"))
@@ -585,6 +595,9 @@ entry_data_status = (
     "FRESH" if len(quote_ages) == 2 and max(quote_ages) <= 60
     else "CHECK LTP AGE"
 )
+current_atm = nearest_atm(nifty_spot)
+if current_atm != atm:
+    entry_data_status = f"ATM SHIFT: selected {atm}, current spot maps to {current_atm}"
 
 gap_text = (
     "Gap Up" if day_open > previous_ohlc["close"]
@@ -635,6 +648,8 @@ state = {
     "pe_high": pe_entry,
     "pe_low": pe_entry,
     "complete": False,
+    "final_ce_ltp": None,
+    "final_pe_ltp": None,
     "scenarios": {},
 }
 for percent in SL_PERCENTAGES:
@@ -720,6 +735,8 @@ except Exception as exc:
     final_ce_time = exit_snapshot_received_at
     final_pe_time = exit_snapshot_received_at
 
+state["final_ce_ltp"] = final_ce_ltp
+state["final_pe_ltp"] = final_pe_ltp
 final_reason = "TEST END" if TEST_MODE else "15:00 EXIT"
 with state_lock:
     for percent in SL_PERCENTAGES:
