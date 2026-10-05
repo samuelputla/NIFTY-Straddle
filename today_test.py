@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time as time_module
 
 import gspread
@@ -72,6 +73,7 @@ DAILY_HEADERS = [
     "CE LTP Last Trade Time (IST)",
     "PE LTP Last Trade Time (IST)",
     "OI Snapshot Retrieved At (IST)",
+    "OI Snapshot Status",
     "OI Strike Scope",
     "Entry Data Status",
     "Run Status",
@@ -394,7 +396,8 @@ def make_daily_row(run_status):
         fmt_time(ce_trade_time),
         fmt_time(pe_trade_time),
         fmt_time(oi_retrieved_at),
-        "FYERS option chain: ATM +/- 50 strikes returned",
+        oi_snapshot_status,
+        "FYERS option chain aggregate OI for returned strike range",
         entry_data_status,
         run_status,
     ])
@@ -551,6 +554,7 @@ chain, expiry, ce, pe = get_atm_options(optionchain_response, atm)
 ce_symbol = ce["symbol"]
 pe_symbol = pe["symbol"]
 oi_retrieved_at = now_ist()
+oi_snapshot_status = "PRE-ENTRY CONTRACT-SELECTION SNAPSHOT"
 call_oi = int(chain.get("callOi", 0) or 0)
 put_oi = int(chain.get("putOi", 0) or 0)
 pcr, market_bias = daily_bias(put_oi, call_oi)
@@ -570,8 +574,45 @@ if not TEST_MODE:
 else:
     quote_request_started_at = now_ist()
 
-entry_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL, ce_symbol, pe_symbol])
-capture_time = now_ist()
+def refresh_optionchain_for_oi():
+    # Use a separate client because this request runs alongside the 09:30 quote batch.
+    oi_client = fyersModel.FyersModel(
+        client_id=CLIENT_ID,
+        token=ACCESS_TOKEN,
+        is_async=False,
+        log_path="",
+    )
+    return oi_client.optionchain({
+        "symbol": NIFTY_SYMBOL,
+        "strikecount": 50,
+        "timestamp": "",
+    })
+
+
+with ThreadPoolExecutor(max_workers=2) as pool:
+    quote_future = pool.submit(
+        get_quotes,
+        [NIFTY_SYMBOL, VIX_SYMBOL, ce_symbol, pe_symbol],
+    )
+    oi_future = pool.submit(refresh_optionchain_for_oi)
+    entry_snapshot = quote_future.result()
+    capture_time = now_ist()
+    try:
+        refreshed_chain_response = oi_future.result(timeout=10)
+        if refreshed_chain_response.get("s") == "ok":
+            chain = refreshed_chain_response["data"]
+            call_oi = int(chain.get("callOi", 0) or 0)
+            put_oi = int(chain.get("putOi", 0) or 0)
+            pcr, market_bias = daily_bias(put_oi, call_oi)
+            oi_retrieved_at = now_ist()
+            oi_snapshot_status = "09:30 REFRESH"
+        else:
+            oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
+            print("OI refresh warning; using pre-entry snapshot")
+    except Exception as exc:
+        oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
+        print("OI refresh warning; using pre-entry snapshot:", exc)
+
 nifty_values = entry_snapshot[NIFTY_SYMBOL]
 vix_values = entry_snapshot[VIX_SYMBOL]
 ce_values = entry_snapshot[ce_symbol]
