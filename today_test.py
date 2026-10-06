@@ -193,6 +193,12 @@ def market_timestamp(value):
 def get_quotes(symbols):
     response = fyers.quotes({"symbols": ",".join(symbols)})
     if response.get("s") != "ok":
+        if len(symbols) > 1 and response.get("code") in (-99, "-99"):
+            print("FYERS rejected batched quotes; retrying one symbol at a time.")
+            combined = {}
+            for symbol in symbols:
+                combined.update(get_quotes([symbol]))
+            return combined
         raise RuntimeError(f"Quotes failed for {symbols}: {response}")
     result = {}
     for item in response.get("d", []):
