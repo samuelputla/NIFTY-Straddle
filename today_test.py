@@ -557,9 +557,8 @@ if not TEST_MODE:
 else:
     print("TEST MODE: preparing and capturing immediately.")
 
-# Preselect ATM and expiry before the entry time so the 09:30 request is one
-# batched quote for NIFTY, VIX, CE, and PE instead of sequential API calls.
-preselection_snapshot = get_quotes([NIFTY_SYMBOL, VIX_SYMBOL])
+# Select the ATM strike and expiry using NIFTY spot only; VIX has no strike selection.
+preselection_snapshot = get_quotes([NIFTY_SYMBOL])
 preselection_received_at = now_ist()
 preselection_nifty = ltp_from_quote(preselection_snapshot[NIFTY_SYMBOL], "NIFTY")
 atm = nearest_atm(preselection_nifty)
@@ -597,7 +596,7 @@ else:
     quote_request_started_at = now_ist()
 
 def refresh_optionchain_for_oi():
-    # Use a separate client because this request runs alongside the 09:30 quote batch.
+    # Use a separate client because this request runs alongside the 09:30 quote requests.
     oi_client = fyersModel.FyersModel(
         client_id=CLIENT_ID,
         token=ACCESS_TOKEN,
@@ -611,13 +610,15 @@ def refresh_optionchain_for_oi():
     })
 
 
-with ThreadPoolExecutor(max_workers=2) as pool:
-    quote_future = pool.submit(
-        get_quotes,
-        [NIFTY_SYMBOL, VIX_SYMBOL, ce_symbol, pe_symbol],
-    )
+with ThreadPoolExecutor(max_workers=4) as pool:
+    nifty_future = pool.submit(get_quotes, [NIFTY_SYMBOL])
+    vix_future = pool.submit(get_quotes, [VIX_SYMBOL])
+    options_future = pool.submit(get_quotes, [ce_symbol, pe_symbol])
     oi_future = pool.submit(refresh_optionchain_for_oi)
-    entry_snapshot = quote_future.result()
+    entry_snapshot = {}
+    entry_snapshot.update(nifty_future.result())
+    entry_snapshot.update(vix_future.result())
+    entry_snapshot.update(options_future.result())
     capture_time = now_ist()
     try:
         refreshed_chain_response = oi_future.result(timeout=10)
