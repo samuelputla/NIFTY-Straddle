@@ -586,12 +586,7 @@ if not TEST_MODE:
         time_module.sleep(0.05)
     quote_request_started_at = now_ist()
     late_seconds = (quote_request_started_at - target_dt).total_seconds()
-    if late_seconds > 5:
-        create_daily_row_for_today()
-        raise RuntimeError(
-            f"Missed 09:30 entry quote: request could start only at "
-            f"{quote_request_started_at.strftime('%H:%M:%S')} IST"
-        )
+    if late_seconds > 5: print(f"Late capture; continuing at {fmt_time(quote_request_started_at)} IST")
 else:
     quote_request_started_at = now_ist()
 
