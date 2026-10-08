@@ -1,0 +1,74 @@
+name: Sync Straddle Dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 15 minutes, 08:30-16:15 IST on weekdays. GitHub may delay schedules.
+    - cron: '*/15 3-10 * * 1-5'
+  workflow_run:
+    workflows: ["NIFTY Straddle Paper Test"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: straddle-dashboard-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install sheet reader
+        run: python -m pip install 'google-auth>=2.40,<3' 'requests>=2.32,<3'
+      - name: Sync Daily_Summary to private dashboard
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, sys, time
+          import requests
+          from google.oauth2.service_account import Credentials
+          from google.auth.transport.requests import AuthorizedSession
+
+          sheet_id = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
+          destination = "https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/sync"
+          token = os.environ.get("STRADDLE_DASHBOARD_TOKEN", "").strip()
+          if not token:
+              sys.exit("Missing STRADDLE_DASHBOARD_TOKEN repository secret.")
+          try:
+              credentials = Credentials.from_service_account_info(
+                  json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
+                  scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+              )
+              source = AuthorizedSession(credentials)
+              response = source.get(
+                  f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/Daily_Summary!A1:CV10000",
+                  params={"valueRenderOption": "FORMATTED_VALUE"}, timeout=45,
+              )
+              if response.status_code != 200:
+                  sys.exit(f"Google Sheets read failed: HTTP {response.status_code}")
+              values = response.json().get("values", [])
+              if not values:
+                  sys.exit("Daily_Summary returned no headers; existing dashboard data preserved.")
+              payload = {"spreadsheetId": sheet_id, "sheet": "Daily_Summary", "values": values}
+              for attempt in range(3):
+                  result = requests.post(destination, json=payload,
+                      headers={"OAI-Sites-Authorization": f"Bearer {token}"},
+                      timeout=45, allow_redirects=False)
+                  if result.status_code == 200 and result.json().get("ok") is True:
+                      print(f"Dashboard synced successfully: {len(values)-1} daily rows.")
+                      break
+                  if result.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                      sys.exit(f"Dashboard sync failed: HTTP {result.status_code}. Check site deployment and connection secret.")
+                  time.sleep(5 * (attempt + 1))
+          except Exception as exc:
+              sys.exit(f"Sync failed ({type(exc).__name__}); no credentials or sheet data logged.")
+          PY
