@@ -3,12 +3,11 @@ name: Sync Straddle Dashboard
 on:
   workflow_dispatch:
   schedule:
-    # Every 15 minutes, 08:30-16:15 IST on weekdays. GitHub may delay schedules.
-    - cron: '*/15 3-10 * * 1-5'
-  workflow_run:
-    workflows: ["NIFTY Straddle Paper Test"]
-    types: [completed]
-    branches: [main]
+    # Every 15 minutes from 08:30 through 15:45 IST on weekdays.
+    - cron: '30,45 8 * * 1-5'
+      timezone: 'Asia/Kolkata'
+    - cron: '*/15 9-15 * * 1-5'
+      timezone: 'Asia/Kolkata'
 
 permissions:
   contents: read
