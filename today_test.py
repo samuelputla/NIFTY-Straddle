@@ -205,16 +205,72 @@ def market_timestamp(value):
         return None
 
 
+def get_optionchain_spot_quote():
+    """Build an index spot quote from FYERS' option-chain underlying entry."""
+    response = fyers.optionchain({
+        "symbol": NIFTY_SYMBOL,
+        "strikecount": 50,
+        "timestamp": "",
+    })
+    if response.get("s") != "ok":
+        raise RuntimeError(
+            f"NIFTY option-chain fallback failed: "
+            f"{response.get('code')} {response.get('message', '')}"
+        )
+
+    chain = response.get("data", {}).get("optionsChain", [])
+    underlying = next(
+        (
+            item for item in chain
+            if item.get("option_type") in (None, "")
+            or item.get("strike_price") == -1
+        ),
+        None,
+    )
+    if underlying is None:
+        raise RuntimeError("FYERS option chain did not include the NIFTY spot entry")
+
+    try:
+        spot = float(underlying.get("ltp", underlying.get("lp")))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("FYERS option-chain spot entry has no valid LTP") from exc
+    if spot <= 0:
+        raise RuntimeError(f"FYERS option-chain returned invalid NIFTY spot: {spot}")
+
+    # The option-chain spot entry may not carry quote OHLC/volume fields.
+    return {
+        NIFTY_SYMBOL: {
+            "lp": spot,
+            "open_price": underlying.get("open_price", 0),
+            "volume": underlying.get("volume", ""),
+        }
+    }
+
+
 def get_quotes(symbols):
     response = fyers.quotes({"symbols": ",".join(symbols)})
     if response.get("s") != "ok":
-        if len(symbols) > 1 and response.get("code") in (-99, "-99"):
-            print("FYERS rejected batched quotes; retrying one symbol at a time.")
+        code = response.get("code")
+        if len(symbols) > 1 and code in (-99, "-99"):
+            print(
+                "FYERS rejected batched quotes; retrying one symbol at a time.",
+                flush=True,
+            )
             combined = {}
             for symbol in symbols:
                 combined.update(get_quotes([symbol]))
             return combined
-        raise RuntimeError(f"Quotes failed for {symbols}: {response}")
+        if symbols == [NIFTY_SYMBOL] and code in (-99, "-99"):
+            print(
+                "FYERS rejected the NIFTY quote request; using the "
+                "NIFTY spot from its option chain.",
+                flush=True,
+            )
+            return get_optionchain_spot_quote()
+        raise RuntimeError(
+            f"Quotes failed for {symbols}: "
+            f"code {code}, {response.get('message', 'unknown error')}"
+        )
     result = {}
     for item in response.get("d", []):
         values = item.get("v", {})
@@ -224,7 +280,7 @@ def get_quotes(symbols):
         result[symbol] = values
     missing = [symbol for symbol in symbols if symbol not in result]
     if missing:
-        raise RuntimeError(f"Quotes missing symbols: {missing}; response={response}")
+        raise RuntimeError(f"Quotes missing symbols: {missing}")
     return result
 
 
@@ -577,7 +633,12 @@ def close_at_end(end_dt):
 # PREPARE CONTRACTS BEFORE 09:30, THEN CAPTURE ENTRY QUOTES
 # ============================================================
 today = now_ist().date()
+print("Fetching previous market-day NIFTY values...", flush=True)
 previous_ohlc = get_previous_day_ohlc(today)
+print(
+    f"Previous market-day candle loaded for {previous_ohlc['date']}.",
+    flush=True,
+)
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
 prep_dt = target_dt - timedelta(seconds=20)
 
@@ -589,9 +650,11 @@ else:
     print("TEST MODE: preparing and capturing immediately.")
 
 # Select the ATM strike and expiry using NIFTY spot only; VIX has no strike selection.
+print("Requesting NIFTY spot for ATM selection...", flush=True)
 preselection_snapshot = get_quotes([NIFTY_SYMBOL])
+preselection_nifty_values = preselection_snapshot[NIFTY_SYMBOL]
 preselection_received_at = now_ist()
-preselection_nifty = ltp_from_quote(preselection_snapshot[NIFTY_SYMBOL], "NIFTY")
+preselection_nifty = ltp_from_quote(preselection_nifty_values, "NIFTY")
 atm = nearest_atm(preselection_nifty)
 
 optionchain_response = fyers.optionchain({
@@ -668,9 +731,13 @@ ce_values = entry_snapshot[ce_symbol]
 pe_values = entry_snapshot[pe_symbol]
 nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
 india_vix = ltp_from_quote(vix_values, "India VIX")
-day_open = float(nifty_values.get("open_price", 0) or 0)
+day_open = float(
+    nifty_values.get("open_price", 0)
+    or preselection_nifty_values.get("open_price", 0)
+    or 0
+)
 if day_open <= 0:
-    raise RuntimeError(f"FYERS quote did not include a valid NIFTY day open: {nifty_values}")
+    day_open = ""
 
 ce_entry = ltp_from_quote(ce_values, "CE")
 pe_entry = ltp_from_quote(pe_values, "PE")
@@ -690,7 +757,8 @@ if current_atm != atm:
     entry_data_status = f"ATM SHIFT: selected {atm}, current spot maps to {current_atm}"
 
 gap_text = (
-    "Gap Up" if day_open > previous_ohlc["close"]
+    "Unavailable" if day_open == ""
+    else "Gap Up" if day_open > previous_ohlc["close"]
     else "Gap Down" if day_open < previous_ohlc["close"]
     else "Flat"
 )
