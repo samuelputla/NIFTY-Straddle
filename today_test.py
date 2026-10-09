@@ -78,6 +78,9 @@ DAILY_HEADERS = [
     "OI Strike Scope",
     "Entry Data Status",
     "Run Status",
+    "NIFTY Reported Volume at Entry Snapshot",
+    "Selected CE Contract Volume at Entry Snapshot",
+    "Selected PE Contract Volume at Entry Snapshot",
 ]
 
 GOOGLE_SCOPES = [
@@ -120,7 +123,19 @@ def ensure_worksheet(title, headers, rows=1000):
             any(str(cell).strip() for cell in row)
             for row in existing_values[1:]
         )
-        if len(existing_headers) == len(headers) and not has_data_rows:
+        if len(existing_headers) < len(headers) and existing_headers == headers[:len(existing_headers)]:
+            # Append new columns without changing historical cells; old rows stay blank there.
+            sheet.resize(
+                rows=max(sheet.row_count, len(existing_values)),
+                cols=max(sheet.col_count, len(headers)),
+            )
+            last_col = column_letter(len(headers))
+            sheet.update(
+                range_name=f"A1:{last_col}1",
+                values=[headers],
+                value_input_option="RAW",
+            )
+        elif len(existing_headers) == len(headers) and not has_data_rows:
             # Safe schema-label migration while a sheet contains headers only.
             last_col = column_letter(len(headers))
             sheet.update(
@@ -218,6 +233,18 @@ def ltp_from_quote(values, label):
         return float(values["lp"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid {label} LTP in quote: {values}") from exc
+
+
+def volume_from_quote(values):
+    """Return FYERS-reported cumulative volume, blank when unavailable."""
+    raw_volume = values.get("volume")
+    if raw_volume in (None, ""):
+        return ""
+    try:
+        volume = float(raw_volume)
+        return int(volume) if volume >= 0 and volume.is_integer() else ""
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
 def get_previous_day_ohlc(today):
@@ -422,6 +449,10 @@ def make_daily_row(run_status):
         "FYERS option chain aggregate OI for returned strike range",
         entry_data_status,
         run_status,
+        # Quote volume is cumulative as of this entry snapshot, not just the 09:30 minute.
+        volume_from_quote(nifty_values),
+        volume_from_quote(ce_values),
+        volume_from_quote(pe_values),
     ])
     return values
 
@@ -446,7 +477,7 @@ def create_daily_row_for_today():
             )
     blank = [""] * len(DAILY_HEADERS)
     blank[0] = today_text
-    blank[-1] = "MISSED 09:30 CAPTURE"
+    blank[DAILY_HEADERS.index("Run Status")] = "MISSED 09:30 CAPTURE"
     daily_sheet.append_row(blank, value_input_option="RAW")
 
 
