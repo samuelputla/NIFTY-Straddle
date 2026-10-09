@@ -49,4 +49,4 @@ jobs:
           pip install fyers-apiv3 gspread google-auth tzdata
 
       - name: Run NIFTY straddle
-        run: python today_test.py
+        run: python -u today_test.py
