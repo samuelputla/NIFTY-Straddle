@@ -26,8 +26,8 @@ CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SCENARIO_SHEET_NAME = "Nifty Daily Straddle Logs"
-DAILY_SHEET_NAME = "Nifty Daily straddle"
+SCENARIO_SHEET_NAME = "SL_Scenarios"
+DAILY_SHEET_NAME = "Daily_Summary"
 
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
@@ -81,7 +81,20 @@ DAILY_HEADERS = [
     "NIFTY Reported Volume at Entry Snapshot",
     "Selected CE Contract Volume at Entry Snapshot",
     "Selected PE Contract Volume at Entry Snapshot",
+    "NIFTY Reported Volume at 3 PM Snapshot",
+    "NIFTY 3 PM Volume Snapshot Retrieved At (IST)",
+    "NIFTY 1-Minute Volume Sum 09:15-15:00",
+    "NIFTY 1-Minute Candle Count 09:15-15:00",
+    "NIFTY 1-Minute Volume History Status",
+    "NIFTY 1-Minute History Retrieved At (IST)",
 ]
+
+nifty_close_volume = ""
+nifty_close_volume_retrieved_at = None
+nifty_intraday_volume_sum = ""
+nifty_intraday_volume_candle_count = ""
+nifty_intraday_volume_status = "NOT CAPTURED"
+nifty_intraday_volume_retrieved_at = None
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -303,6 +316,74 @@ def volume_from_quote(values):
         return ""
 
 
+def get_nifty_intraday_volume_through_close(trade_date):
+    """Sum completed FYERS one-minute NIFTY index candles from 09:15 to 15:00."""
+    response = fyers.history({
+        "symbol": NIFTY_SYMBOL,
+        "resolution": "1",
+        "date_format": "1",
+        "range_from": trade_date.strftime("%Y-%m-%d"),
+        "range_to": trade_date.strftime("%Y-%m-%d"),
+        "cont_flag": "1",
+    })
+    if response.get("s") != "ok":
+        raise RuntimeError("NIFTY one-minute history request failed")
+
+    start_dt = datetime.combine(trade_date, time(9, 15), tzinfo=IST)
+    end_dt = datetime.combine(trade_date, EXIT_TIME, tzinfo=IST)
+    expected_count = int((end_dt - start_dt).total_seconds() // 60)
+    volume_total = 0.0
+    candle_count = 0
+    for candle in response.get("candles", []):
+        if len(candle) < 6:
+            continue
+        candle_dt = datetime.fromtimestamp(float(candle[0]), IST)
+        if not start_dt <= candle_dt < end_dt:
+            continue
+        try:
+            volume = float(candle[5])
+        except (TypeError, ValueError):
+            continue
+        if volume < 0:
+            continue
+        volume_total += volume
+        candle_count += 1
+
+    if candle_count == 0:
+        return "", 0, "NO CANDLES"
+    total = int(volume_total) if volume_total.is_integer() else round(volume_total, 2)
+    status = "COMPLETE" if candle_count == expected_count else f"PARTIAL ({candle_count}/{expected_count})"
+    return total, candle_count, status
+
+
+def capture_nifty_close_volume(trade_date):
+    """Best-effort 3 PM volume snapshot and history comparison; never fail the run."""
+    global nifty_close_volume
+    global nifty_close_volume_retrieved_at
+    global nifty_intraday_volume_sum
+    global nifty_intraday_volume_candle_count
+    global nifty_intraday_volume_status
+    global nifty_intraday_volume_retrieved_at
+
+    try:
+        close_quote = get_quotes([NIFTY_SYMBOL])[NIFTY_SYMBOL]
+        nifty_close_volume = volume_from_quote(close_quote)
+        nifty_close_volume_retrieved_at = now_ist()
+        if nifty_close_volume == "":
+            print("NIFTY 3 PM volume warning: quote did not include volume", flush=True)
+    except Exception as exc:
+        print("NIFTY 3 PM volume quote warning:", exc, flush=True)
+
+    try:
+        nifty_intraday_volume_sum, nifty_intraday_volume_candle_count, nifty_intraday_volume_status = (
+            get_nifty_intraday_volume_through_close(trade_date)
+        )
+        nifty_intraday_volume_retrieved_at = now_ist()
+    except Exception as exc:
+        nifty_intraday_volume_status = "HISTORY ERROR"
+        print("NIFTY one-minute volume history warning:", exc, flush=True)
+
+
 def get_previous_day_ohlc(today):
     start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
@@ -488,11 +569,11 @@ def make_daily_row(run_status):
     values.extend(scenario_nets[p][1] for p in SL_PERCENTAGES)
     values.extend(scenario_nets[p][2] for p in SL_PERCENTAGES)
     values.extend(
-        ce_sl_values[i]
+        sl_cell(state["scenarios"][p], "ce", ce_sl_values[i])
         for i, p in enumerate(SL_PERCENTAGES)
     )
     values.extend(
-        pe_sl_values[i]
+        sl_cell(state["scenarios"][p], "pe", pe_sl_values[i])
         for i, p in enumerate(SL_PERCENTAGES)
     )
     values.extend([
@@ -509,6 +590,12 @@ def make_daily_row(run_status):
         volume_from_quote(nifty_values),
         volume_from_quote(ce_values),
         volume_from_quote(pe_values),
+        nifty_close_volume,
+        fmt_time(nifty_close_volume_retrieved_at),
+        nifty_intraday_volume_sum,
+        nifty_intraday_volume_candle_count,
+        nifty_intraday_volume_status,
+        fmt_time(nifty_intraday_volume_retrieved_at),
     ])
     return values
 
@@ -528,7 +615,7 @@ def create_daily_row_for_today():
     for row_number, row in enumerate(values[1:], start=2):
         if row and row[0] == today_text:
             raise RuntimeError(
-                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
+                f"Daily_Summary already has a row for {today_text}; "
                 "refusing to create a duplicate run"
             )
     blank = [""] * len(DAILY_HEADERS)
@@ -793,7 +880,7 @@ if not TEST_MODE:
     for row_number, row in enumerate(summary_rows[1:], start=2):
         if row and row[0] == today_text:
             raise RuntimeError(
-                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
+                f"Daily_Summary already has a row for {today_text}; "
                 "refusing to duplicate the day's straddle"
             )
     daily_row_number = len(summary_rows) + 1
@@ -892,6 +979,11 @@ except Exception as exc:
     final_pe_ltp = state["pe_ltp"]
     final_ce_time = exit_snapshot_received_at
     final_pe_time = exit_snapshot_received_at
+
+# The index-volume study is independent of the option closing quote. Record its
+# quote and one-minute history comparison only for the scheduled 15:00 exit.
+if not TEST_MODE:
+    capture_nifty_close_volume(capture_time.date())
 
 state["final_ce_ltp"] = final_ce_ltp
 state["final_pe_ltp"] = final_pe_ltp
