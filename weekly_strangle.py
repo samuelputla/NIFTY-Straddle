@@ -25,7 +25,8 @@ CLIENT_ID = "M2DACFCYUO-100"
 ACCESS_TOKEN = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
 GOOGLE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 SPREADSHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
-SHEET_NAME = "Weekly_Strangle"
+SHEET_NAME = "Nifty Weekly Strangle"
+LOG_SHEET_NAME = "Nifty Weekly Strangle Logs"
 UNDERLYING = "NSE:NIFTY50-INDEX"
 IST = ZoneInfo("Asia/Kolkata")
 START_TIME = time(9, 30)
@@ -49,6 +50,11 @@ HEADERS = [
     "Initial Combined Credit", "Realized P&L (Premium Points)", "Open P&L (Premium Points)",
     "Net P&L (Premium Points)", "Net P&L (₹)", "Quantity (Units)", "80% Target (₹)",
     "Premium Divergence %", "Adjustment Count", "Last Event", "Last Event Time (IST)", "Exit Reason", "State JSON",
+]
+LOG_HEADERS = [
+    "Event ID", "Cycle ID", "Event Time (IST)", "Event Type", "Position Action", "Leg",
+    "Symbol", "Expiry", "Phase", "Simulated Fill Premium", "Quantity (Units)", "Reason",
+    "Realized P&L (₹)", "Cycle Net P&L (₹)", "Cycle Status",
 ]
 
 
@@ -81,29 +87,30 @@ def column_letter(n: int) -> str:
     return out
 
 
-def prepare_sheet():
+def prepare_sheet(tab_name: str, headers: list[str]):
     try:
-        ws = sheet.worksheet(SHEET_NAME)
+        ws = sheet.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=SHEET_NAME, rows=100000, cols=len(HEADERS))
-    ws.resize(rows=max(ws.row_count, 100000), cols=max(ws.col_count, len(HEADERS)))
-    current = ws.get("A1:AD1")
+        ws = sheet.add_worksheet(title=tab_name, rows=1000, cols=len(headers))
+    ws.resize(rows=max(ws.row_count, 1000), cols=max(ws.col_count, len(headers)))
+    current = ws.get(f"A1:{column_letter(len(headers))}1")
     current = current[0] if current else []
     if not current:
-        ws.update(range_name=f"A1:{column_letter(len(HEADERS))}1", values=[HEADERS], value_input_option="RAW")
-    elif current != HEADERS:
+        ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
+    elif current != headers:
         rows = ws.get_all_values()
         has_records = any(any(str(c).strip() for c in r) for r in rows[1:])
-        if not has_records and len(current) == len(HEADERS):
-            ws.update(range_name=f"A1:{column_letter(len(HEADERS))}1", values=[HEADERS], value_input_option="RAW")
+        if not has_records and len(current) == len(headers):
+            ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
         else:
-            raise RuntimeError(f"{SHEET_NAME} has an unexpected schema; refusing to rewrite existing rows")
+            raise RuntimeError(f"{tab_name} has an unexpected schema; refusing to rewrite existing rows")
     return ws
 
 
-sheet_tab = prepare_sheet()
+sheet_tab = prepare_sheet(SHEET_NAME, HEADERS)
+log_tab = prepare_sheet(LOG_SHEET_NAME, LOG_HEADERS)
 if os.getenv("WEEKLY_SETUP_ONLY", "false").lower() == "true":
-    print(f"Google Sheet tab ready: {SHEET_NAME}")
+    print(f"Google Sheet tabs ready: {SHEET_NAME}, {LOG_SHEET_NAME}")
     raise SystemExit(0)
 
 if not ACCESS_TOKEN:
@@ -238,7 +245,7 @@ def load_latest_state() -> dict | None:
     index = {h: i for i, h in enumerate(rows[0])}
     state_i = index.get("State JSON")
     if state_i is None:
-        raise RuntimeError("Weekly_Strangle is missing its State JSON column")
+        raise RuntimeError(f"{SHEET_NAME} is missing its State JSON column")
     for row in reversed(rows[1:]):
         if len(row) <= state_i or not row[state_i].strip():
             continue
@@ -286,6 +293,19 @@ def snapshot_row(s: dict, event: str = "") -> list:
     ]
 
 
+def record_position_event(
+    s: dict, event_type: str, action: str, side: str, symbol: str,
+    premium: float, reason: str,
+):
+    _, _, net_rupees = p_and_l(s)
+    log_tab.append_row([
+        uuid.uuid4().hex, s.get("cycle_id", ""), fmt(now_ist()), event_type, action, side,
+        symbol, s.get("expiry", ""), s.get("phase", ""), round(float(premium), 2),
+        CONTRACT_QTY, reason, round(float(s.get("realized_points", 0.0)) * CONTRACT_QTY, 2),
+        net_rupees, s.get("status", ""),
+    ], value_input_option="RAW")
+
+
 def log_state(s: dict, event: str = ""):
     global last_write_at
     with state_lock:
@@ -323,6 +343,7 @@ def close_leg(s: dict, side: str, ltp: float, event: str):
     old_symbol = leg["symbol"]
     leg["closed_ltp"] = ltp
     leg["closed_time"] = fmt(now_ist())
+    record_position_event(s, "POSITION EXIT", "BUY TO CLOSE", side, old_symbol, ltp, event)
     unsubscribe([old_symbol])
     return old_symbol
 
@@ -353,6 +374,9 @@ def start_cycle(after_epoch: str | None, event: str):
         epoch, _ = expiry_options(data, after_epoch)
     contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
     s = make_cycle(epoch, contracts["CE"], contracts["PE"], event)
+    for side in ("CE", "PE"):
+        leg = s["legs"][side]
+        record_position_event(s, "CYCLE ENTRY", "SELL TO OPEN", side, leg["symbol"], leg["ltp"], event)
     if now_ist().weekday() == 1:
         entry_attempted_date = now_ist().date()
     subscribe([contracts["CE"]["symbol"], contracts["PE"]["symbol"]])
@@ -393,6 +417,7 @@ def roll_low_leg(s: dict, reason: str):
     s["legs"][low_side] = {"symbol": new_symbol, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
     s["adjustment_count"] = int(s["adjustment_count"]) + 1
     s["phase"] = "STRADDLE"
+    record_position_event(s, "ADJUSTMENT ENTRY", "SELL TO OPEN", low_side, new_symbol, new_ltp, reason)
     if s.get("straddle_credit") is None:
         # Stop reference is the premium received for the retained high leg
         # plus the replacement leg, not the high leg's market value at roll.
@@ -538,13 +563,7 @@ def main():
         stamp = now_ist()
         if cycle is None and stamp.time() >= START_TIME and stamp.weekday() == 1 and entry_attempted_date != stamp.date():
             # First cycle, or a prior stop exit: Tuesday is the weekly entry day.
-            data = option_chain()
-            epoch, _ = expiry_options(data, after_date=stamp.date())
-            contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
-            cycle = make_cycle(epoch, contracts["CE"], contracts["PE"], "TUESDAY WEEKLY ENTRY")
-            entry_attempted_date = stamp.date()
-            subscribe([contracts["CE"]["symbol"], contracts["PE"]["symbol"]])
-            log_state(cycle, "TUESDAY WEEKLY ENTRY")
+            cycle = start_cycle(None, "TUESDAY WEEKLY ENTRY")
         process_tick_actions()
         if stamp.time() >= ADJUST_TIME and cycle and should_roll(cycle, stamp):
             process_tick_actions()
