@@ -155,11 +155,18 @@ def expiry_options(data: dict, expiry_epoch: str | None = None, *, after_date: d
     expiries = data.get("expiryData", [])
     today = now_ist().date()
     viable = []
+    flags_available = any(entry.get("expiry_flag") for entry in expiries)
     for entry in expiries:
         try:
             exp_date = parse_date(entry["date"])
             epoch = str(entry["expiry"])
         except (KeyError, ValueError, TypeError):
+            continue
+        expiry_flag = str(entry.get("expiry_flag", "")).upper()
+        if flags_available and expiry_flag != "W":
+            continue
+        if not flags_available and exp_date.weekday() != 1:
+            # Fail safely when the API omits contract type information.
             continue
         date_floor = after_date if after_date is not None else today - timedelta(days=1)
         if exp_date > date_floor and (expiry_epoch is None or int(epoch) > int(expiry_epoch)):
@@ -387,7 +394,9 @@ def roll_low_leg(s: dict, reason: str):
     s["adjustment_count"] = int(s["adjustment_count"]) + 1
     s["phase"] = "STRADDLE"
     if s.get("straddle_credit") is None:
-        s["straddle_credit"] = round(high_ltp + new_ltp, 2)
+        # Stop reference is the premium received for the retained high leg
+        # plus the replacement leg, not the high leg's market value at roll.
+        s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
     subscribe([new_symbol])
     unsubscribe([old_symbol])
     last_adjustment_at = now_ist()
