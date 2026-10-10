@@ -488,11 +488,11 @@ def make_daily_row(run_status):
     values.extend(scenario_nets[p][1] for p in SL_PERCENTAGES)
     values.extend(scenario_nets[p][2] for p in SL_PERCENTAGES)
     values.extend(
-        sl_cell(state["scenarios"][p], "ce", ce_sl_values[i])
+        ce_sl_values[i]
         for i, p in enumerate(SL_PERCENTAGES)
     )
     values.extend(
-        sl_cell(state["scenarios"][p], "pe", pe_sl_values[i])
+        pe_sl_values[i]
         for i, p in enumerate(SL_PERCENTAGES)
     )
     values.extend([
