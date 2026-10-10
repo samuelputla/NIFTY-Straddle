@@ -9,6 +9,8 @@ from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 
 SHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
+DAILY_SHEET = "Nifty Daily straddle"
+WEEKLY_SHEET = "Nifty Weekly Strangle"
 DESTINATION = "https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/sync"
 SOURCE = "https://sheets.googleapis.com/v4/spreadsheets/" + SHEET_ID + "/values/"
 
@@ -21,20 +23,20 @@ def read_values(session, a1_range):
 def weekly_snapshot(session):
     # Count populated cycle rows first, then sync only the newest 4,000 records.
     # This keeps the Site request below its payload ceiling over long histories.
-    count = read_values(session, "Weekly_Strangle!A:A")
+    count = read_values(session, f"'{WEEKLY_SHEET}'!A:A")
     if count.status_code != 200:
         return None
     last_row = len(count.json().get("values", []))
     if not last_row:
         return None
-    header_response = read_values(session, "Weekly_Strangle!A1:AD1")
+    header_response = read_values(session, f"'{WEEKLY_SHEET}'!A1:AD1")
     if header_response.status_code != 200:
         raise RuntimeError(f"Weekly sheet header read failed: HTTP {header_response.status_code}")
     header = header_response.json().get("values", [[]])[0]
     if last_row == 1:
         return [header]
     first_row = max(2, last_row - 3999)
-    body = read_values(session, f"Weekly_Strangle!A{first_row}:AD{last_row}")
+    body = read_values(session, f"'{WEEKLY_SHEET}'!A{first_row}:AD{last_row}")
     if body.status_code != 200:
         raise RuntimeError(f"Weekly sheet rows read failed: HTTP {body.status_code}")
     return [header] + body.json().get("values", [])
@@ -65,13 +67,13 @@ def main():
             json.loads(service_account), scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
         )
         session = AuthorizedSession(credentials)
-        daily = read_values(session, "Daily_Summary!A1:CV10000")
+        daily = read_values(session, f"'{DAILY_SHEET}'!A1:CV10000")
         if daily.status_code != 200:
-            raise RuntimeError(f"Google Sheets read failed for Daily_Summary: HTTP {daily.status_code}")
+            raise RuntimeError(f"Google Sheets read failed for {DAILY_SHEET}: HTTP {daily.status_code}")
         daily_values = daily.json().get("values", [])
         if not daily_values:
-            raise RuntimeError("Daily_Summary returned no headers; previous dashboard data remains saved.")
-        send("Daily_Summary", daily_values, token)
+            raise RuntimeError(f"{DAILY_SHEET} returned no headers; previous dashboard data remains saved.")
+        send(DAILY_SHEET, daily_values, token)
 
         try:
             weekly_values = weekly_snapshot(session)
@@ -79,9 +81,9 @@ def main():
             print(f"{exc}; daily dashboard data remains synced.")
             return
         if not weekly_values:
-            print("Weekly_Strangle is not available yet; daily dashboard data remains synced.")
+            print(f"{WEEKLY_SHEET} is not available yet; daily dashboard data remains synced.")
             return
-        send("Weekly_Strangle", weekly_values, token)
+        send(WEEKLY_SHEET, weekly_values, token)
     except Exception as exc:
         sys.exit(f"Sync failed ({type(exc).__name__}); no credentials or sheet data logged.")
 
