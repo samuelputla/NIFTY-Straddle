@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       setup_only:
-        description: "Create or verify the Weekly_Strangle sheet tab without contacting FYERS"
+        description: "Create or verify the weekly summary and event-log tabs without contacting FYERS"
         required: false
         type: boolean
         default: true
