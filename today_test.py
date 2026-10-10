@@ -26,8 +26,8 @@ CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SCENARIO_SHEET_NAME = "SL_Scenarios"
-DAILY_SHEET_NAME = "Daily_Summary"
+SCENARIO_SHEET_NAME = "Nifty Daily Straddle Logs"
+DAILY_SHEET_NAME = "Nifty Daily straddle"
 
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
@@ -528,7 +528,7 @@ def create_daily_row_for_today():
     for row_number, row in enumerate(values[1:], start=2):
         if row and row[0] == today_text:
             raise RuntimeError(
-                f"Daily_Summary already has a row for {today_text}; "
+                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
                 "refusing to create a duplicate run"
             )
     blank = [""] * len(DAILY_HEADERS)
@@ -793,7 +793,7 @@ if not TEST_MODE:
     for row_number, row in enumerate(summary_rows[1:], start=2):
         if row and row[0] == today_text:
             raise RuntimeError(
-                f"Daily_Summary already has a row for {today_text}; "
+                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
                 "refusing to duplicate the day's straddle"
             )
     daily_row_number = len(summary_rows) + 1
@@ -935,3 +935,4 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
