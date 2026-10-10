@@ -3,7 +3,7 @@
 ## Safety and separation
 
 - This strategy is paper-only. It uses FYERS quotes, option-chain data, and a data WebSocket; it has no order-placement API calls.
-- It writes only to the `Weekly_Strangle` tab in the existing research spreadsheet. The daily short-straddle script and its 15:00 exit are unchanged.
+- It writes cycle snapshots and resumable state to `Nifty Weekly Strangle`, with position entries, buybacks, and square-off metadata in `Nifty Weekly Strangle Logs`. The daily short-straddle script writes to `Nifty Daily straddle` and `Nifty Daily Straddle Logs`; its 15:00 exit is unchanged.
 - It uses the same FYERS access-token secret and Google service-account secret. It runs as a second monitor with its own data socket; at most four option symbols are needed concurrently across the two strategies.
 
 ## Cycle contract
@@ -19,9 +19,9 @@
 
 ## Logging and dashboard data contract
 
-`Weekly_Strangle` is an append-only snapshot/event log. It stores cycle identity, snapshot time, expiry, active CE/PE symbols and premiums, high/low premiums, initial credit, realized/open/net premium points, estimated rupee P&L, target, divergence, adjustment count, event, exit reason, and a serialized state used to resume after Actions runs.
+`Nifty Weekly Strangle` is an append-only cycle snapshot log. It stores cycle identity, snapshot time, expiry, active CE/PE symbols and premiums, high/low premiums, initial credit, realized/open/net premium points, estimated rupee P&L, target, divergence, adjustment count, last event, exit reason, and serialized state used to resume after Actions runs. `Nifty Weekly Strangle Logs` records one row per simulated position open or buyback, including side, symbol, simulated fill premium, quantity, reason, and cycle P&L.
 
-The sync API accepts only the known spreadsheet ID and one of two sheet names: `Daily_Summary` or `Weekly_Strangle`. It validates each tab's headers and stores independent R2 snapshots. `GET /api/weekly-data` returns the weekly snapshot to the dashboard. No broker access token or service-account key is sent to the Site.
+The sync API accepts only the known spreadsheet ID and the snapshot tabs `Nifty Daily straddle` or `Nifty Weekly Strangle`. It validates each tab's headers and stores independent R2 snapshots. `GET /api/weekly-data` returns the weekly snapshot to the dashboard. The logs tab is retained for spreadsheet study and is not used as the dashboard data source. No broker access token or service-account key is sent to the Site.
 
 ## Measurement limits
 
