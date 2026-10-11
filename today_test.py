@@ -292,15 +292,15 @@ def ltp_from_quote(values, label):
 
 
 def volume_from_quote(values):
-    """Return FYERS-reported cumulative volume, blank when unavailable."""
+    """Return FYERS-reported cumulative volume, using zero when unavailable."""
     raw_volume = values.get("volume")
     if raw_volume in (None, ""):
-        return ""
+        return 0
     try:
         volume = float(raw_volume)
-        return int(volume) if volume >= 0 and volume.is_integer() else ""
+        return int(volume) if volume >= 0 and volume.is_integer() else 0
     except (TypeError, ValueError, OverflowError):
-        return ""
+        return 0
 
 
 def get_previous_day_ohlc(today):
