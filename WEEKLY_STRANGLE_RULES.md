@@ -4,13 +4,13 @@
 
 - This strategy is paper-only. It uses FYERS quotes, option-chain data, and a data WebSocket; it has no order-placement API calls.
 - It writes cycle snapshots and resumable state to `Nifty Weekly Strangle`, with position entries, buybacks, and square-off metadata in `Nifty Weekly Strangle Logs`. The daily short-straddle script writes to `Nifty Daily straddle` and `Nifty Daily Straddle Logs`; its 15:00 exit is unchanged.
-- It uses the same FYERS access-token secret and Google service-account secret. It runs as a second monitor with its own data socket; at most four option symbols are needed concurrently across the two strategies.
+- It uses the same FYERS access-token secret and Google service-account secret. It runs as a second monitor with its own data socket. During Tuesday entry preparation it subscribes to at most 32 near-₹25 candidates, the current weekly legs, and NIFTY spot (at most 35 symbols, below FYERS Standard's 50-symbol socket limit).
 
 ## Cycle contract
 
-1. Start the monitor before market open, connect to the data stream from 09:15 IST, and wait until 09:30 for a new entry or Tuesday expiry rollover.
+1. The workflow is scheduled for 08:55 IST. It connects to the data stream after 09:15 and aims to capture entry prices at/just after 09:30. On Tuesday it prepares a bounded candidate list, uses post-09:30 WebSocket ticks if available, then falls back to live quotes. Transient quote errors are retried without writing a failed-capture row; the actual capture time and method are saved.
 2. Start a new cycle on Tuesday only, choosing the first listed expiry strictly after that Tuesday. Select the CE and PE independently by the closest option-chain premium to ₹25. Use one 65-unit leg each.
-3. Restore active legs from the latest `State JSON` cell on each weekday run and continue monitoring them until the selected expiry, a cycle exit, or 15:30 IST.
+3. Restore active legs or a queued next-cycle entry from the latest `State JSON` cell on each weekday run and continue monitoring them until the selected expiry, a cycle exit, or 15:30 IST.
 4. If either leg premium is at least 50% below the other, buy back only the lower-premium leg and paper-sell a replacement of the same option type, same expiry, and nearest premium to 85% of the higher leg's current premium. Leave the higher-premium leg unchanged.
 5. At/after 15:25 IST, a premium gap of at least 80% invokes that same replacement rule, whether or not the 50% rule was used earlier that day.
 6. On the first replacement, mark the cycle as a straddle and freeze its combined premium reference. If combined active premiums rise 10% above that reference, close both strategy legs and wait until Tuesday to begin the next cycle.
