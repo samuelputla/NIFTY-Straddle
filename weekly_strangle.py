@@ -34,6 +34,9 @@ MARKET_OPEN = time(9, 15)
 ADJUST_TIME = time(15, 25)
 END_TIME = time.fromisoformat(os.getenv("WEEKLY_SESSION_END", "15:30"))
 TARGET_PREMIUM = 25.0
+ENTRY_CANDIDATES_PER_SIDE = 16
+ENTRY_TICK_WAIT_SECONDS = 5
+ENTRY_RETRY_SECONDS = 15
 REPLACEMENT_RATIO = 0.85
 INITIAL_DIVERGENCE = 0.50
 EOD_DIVERGENCE = 0.80
@@ -119,6 +122,7 @@ if not ACCESS_TOKEN:
 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, is_async=False, log_path="")
 state_lock = threading.RLock()
 latest: dict[str, float] = {}
+latest_at: dict[str, datetime] = {}
 socket_holder: dict[str, object] = {"socket": None}
 subscribed: set[str] = set()
 stop_event = threading.Event()
@@ -127,6 +131,10 @@ last_write_at: datetime | None = None
 cycle: dict | None = None
 current_spot = ""
 entry_attempted_date: date | None = None
+prepared_expiry: str | None = None
+prepared_candidates: dict[str, list[dict]] = {"CE": [], "PE": []}
+pending_entry: tuple[str | None, str, bool] | None = None
+next_entry_retry_at: datetime | None = None
 
 
 def option_chain(timestamp: str = "") -> dict:
@@ -213,13 +221,105 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
     return chosen
 
 
-def make_cycle(expiry_epoch: str, ce: dict, pe: dict, reason: str) -> dict:
-    stamp = now_ist()
+def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
+    """Prepare a bounded set of near-₹25 contracts before the 09:30 entry."""
+    data = option_chain(expiry_epoch)
+    by_side: dict[str, list[dict]] = {"CE": [], "PE": []}
+    for item in data.get("optionsChain", []):
+        side = item.get("option_type")
+        if side not in by_side:
+            continue
+        symbol = item.get("symbol")
+        try:
+            premium = float(item.get("ltp", item.get("lp")))
+            strike = float(item.get("strike_price"))
+        except (TypeError, ValueError):
+            continue
+        if symbol and premium > 0:
+            by_side[side].append({"symbol": symbol, "ltp": premium, "strike": strike, "side": side})
+    for side in by_side:
+        by_side[side] = sorted(
+            by_side[side], key=lambda c: abs(c["ltp"] - TARGET_PREMIUM)
+        )[:ENTRY_CANDIDATES_PER_SIDE]
+        if not by_side[side]:
+            raise RuntimeError(f"No {side} candidates in the prepared weekly expiry")
+    return by_side
+
+
+def prepare_tuesday_entry() -> None:
+    """Resolve expiry and candidate symbols before market entry time."""
+    global prepared_expiry, prepared_candidates
+    current = now_ist()
+    if current.weekday() != 1 or current.time() >= START_TIME:
+        return
+    expiries = option_chain()
+    active_expiry = cycle.get("expiry_epoch") if cycle and cycle.get("status") == "ACTIVE" else None
+    if active_expiry and parse_date(cycle["expiry"]) == current.date():
+        prepared_expiry, _ = expiry_options(expiries, active_expiry)
+    else:
+        prepared_expiry, _ = expiry_options(expiries, after_date=current.date())
+    prepared_candidates = candidate_contracts(prepared_expiry)
+    symbols = [item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]]
+    print(
+        f"Prepared next-week expiry {prepared_expiry} and {len(symbols)} near-₹25 candidate symbols before 09:30 IST.",
+        flush=True,
+    )
+
+
+def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], datetime, str]:
+    """Use post-09:30 WebSocket ticks when available, then quote the shortlist."""
+    if str(expiry_epoch) != str(prepared_expiry):
+        chosen = target_contracts(expiry_epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
+        return chosen, now_ist(), "FYERS quote snapshot"
+
+    pool = prepared_candidates
+    target_dt = datetime.combine(now_ist().date(), START_TIME, tzinfo=IST)
+    # If the runner starts late, never select a pre-09:30 tick as the entry.
+    deadline = max(now_ist(), target_dt) + timedelta(seconds=ENTRY_TICK_WAIT_SECONDS)
+    while now_ist() < deadline:
+        chosen = {}
+        for side in ("CE", "PE"):
+            fresh = [
+                {**item, "ltp": latest[item["symbol"]]}
+                for item in pool[side]
+                if item["symbol"] in latest_at
+                and latest_at[item["symbol"]] >= target_dt
+                and item["symbol"] in latest
+                and latest[item["symbol"]] > 0
+            ]
+            if fresh:
+                chosen[side] = min(fresh, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+        if len(chosen) == 2:
+            captured_at = max(latest_at[chosen[side]["symbol"]] for side in ("CE", "PE"))
+            return chosen, captured_at, "post-09:30 WebSocket tick"
+        time_module.sleep(0.05)
+
+    symbols = [item["symbol"] for side in ("CE", "PE") for item in pool[side]]
+    values = quote(symbols)
+    chosen = {}
+    for side in ("CE", "PE"):
+        candidates = [
+            {**item, "ltp": values[item["symbol"]]}
+            for item in pool[side]
+            if item["symbol"] in values and values[item["symbol"]] > 0
+        ]
+        if not candidates:
+            raise RuntimeError(f"No usable {side} quote in the prepared candidate set")
+        chosen[side] = min(candidates, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+    return chosen, now_ist(), "FYERS quote fallback"
+
+
+def make_cycle(
+    expiry_epoch: str, ce: dict, pe: dict, reason: str,
+    entry_time: datetime, capture_method: str,
+) -> dict:
+    stamp = entry_time
     initial = round(ce["ltp"] + pe["ltp"], 2)
     return {
         "cycle_id": f"{stamp:%Y%m%d}-{uuid.uuid4().hex[:8]}",
         "start_date": stamp.date().isoformat(),
         "start_time": fmt(stamp),
+        "entry_capture_method": capture_method,
         "expiry_epoch": str(expiry_epoch),
         "expiry": next((e["date"] for e in option_chain().get("expiryData", []) if str(e.get("expiry")) == str(expiry_epoch)), ""),
         "status": "ACTIVE",
@@ -265,7 +365,11 @@ def load_state() -> dict | None:
 
 
 def p_and_l(s: dict) -> tuple[float, float, float]:
-    open_points = sum(float(leg["credit"]) - float(leg.get("ltp", leg["credit"])) for leg in s["legs"].values())
+    open_points = sum(
+        float(leg["credit"]) - float(leg.get("ltp", leg["credit"]))
+        for leg in s["legs"].values()
+        if leg.get("is_open", True)
+    )
     net_points = float(s["realized_points"]) + open_points
     return round(open_points, 2), round(net_points, 2), round(net_points * CONTRACT_QTY, 2)
 
@@ -295,11 +399,11 @@ def snapshot_row(s: dict, event: str = "") -> list:
 
 def record_position_event(
     s: dict, event_type: str, action: str, side: str, symbol: str,
-    premium: float, reason: str,
+    premium: float, reason: str, event_time: str | None = None,
 ):
     _, _, net_rupees = p_and_l(s)
     log_tab.append_row([
-        uuid.uuid4().hex, s.get("cycle_id", ""), fmt(now_ist()), event_type, action, side,
+        uuid.uuid4().hex, s.get("cycle_id", ""), event_time or fmt(now_ist()), event_type, action, side,
         symbol, s.get("expiry", ""), s.get("phase", ""), round(float(premium), 2),
         CONTRACT_QTY, reason, round(float(s.get("realized_points", 0.0)) * CONTRACT_QTY, 2),
         net_rupees, s.get("status", ""),
@@ -343,15 +447,24 @@ def close_leg(s: dict, side: str, ltp: float, event: str):
     old_symbol = leg["symbol"]
     leg["closed_ltp"] = ltp
     leg["closed_time"] = fmt(now_ist())
+    leg["is_open"] = False
     record_position_event(s, "POSITION EXIT", "BUY TO CLOSE", side, old_symbol, ltp, event)
     unsubscribe([old_symbol])
     return old_symbol
 
 
 def close_cycle(s: dict, reason: str):
-    symbols = [leg["symbol"] for leg in s["legs"].values()]
+    symbols = [leg["symbol"] for leg in s["legs"].values() if leg.get("is_open", True)]
+    if not symbols:
+        s["status"] = "CLOSED"
+        s["exit_reason"] = reason
+        s["phase"] = "CLOSED"
+        log_state(s, reason)
+        return
     values = quote(symbols)
     for side, leg in list(s["legs"].items()):
+        if not leg.get("is_open", True):
+            continue
         ltp = values[leg["symbol"]]
         leg["ltp"] = ltp
         close_leg(s, side, ltp, reason)
@@ -365,23 +478,41 @@ def expiry_after(epoch: str) -> str:
     return expiry_options(option_chain(), epoch)[0]
 
 
-def start_cycle(after_epoch: str | None, event: str):
+def start_cycle(after_epoch: str | None, event: str, use_prepared: bool = False):
     global entry_attempted_date
     data = option_chain()
     if after_epoch is None:
         epoch, _ = expiry_options(data, after_date=now_ist().date())
     else:
         epoch, _ = expiry_options(data, after_epoch)
-    contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
-    s = make_cycle(epoch, contracts["CE"], contracts["PE"], event)
+    if use_prepared and str(epoch) == str(prepared_expiry):
+        contracts, captured_at, capture_method = capture_prepared_contracts(epoch)
+    else:
+        contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
+        captured_at, capture_method = now_ist(), "FYERS quote snapshot"
+    s = make_cycle(epoch, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
     for side in ("CE", "PE"):
         leg = s["legs"][side]
-        record_position_event(s, "CYCLE ENTRY", "SELL TO OPEN", side, leg["symbol"], leg["ltp"], event)
+        record_position_event(
+            s, "CYCLE ENTRY", "SELL TO OPEN", side, leg["symbol"], leg["ltp"], event,
+            event_time=fmt(captured_at),
+        )
     if now_ist().weekday() == 1:
         entry_attempted_date = now_ist().date()
     subscribe([contracts["CE"]["symbol"], contracts["PE"]["symbol"]])
+    selected = {contracts["CE"]["symbol"], contracts["PE"]["symbol"]}
+    unused = [
+        item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]
+        if item["symbol"] not in selected
+    ]
+    unsubscribe(unused)
     log_state(s, event)
-    print(f"Paper cycle {s['cycle_id']} started: expiry {s['expiry']}, CE {contracts['CE']['symbol']} @{contracts['CE']['ltp']:.2f}, PE {contracts['PE']['symbol']} @{contracts['PE']['ltp']:.2f}", flush=True)
+    print(
+        f"Paper cycle {s['cycle_id']} started: expiry {s['expiry']}, "
+        f"CE {contracts['CE']['symbol']} @{contracts['CE']['ltp']:.2f}, "
+        f"PE {contracts['PE']['symbol']} @{contracts['PE']['ltp']:.2f}; "
+        f"captured {fmt(captured_at)} via {capture_method}", flush=True,
+    )
     return s
 
 
@@ -449,6 +580,7 @@ def on_message(message):
         if symbol == UNDERLYING:
             current_spot = round(ltp, 2)
         latest[symbol] = ltp
+        latest_at[symbol] = now_ist()
         if cycle:
             for leg in cycle.get("legs", {}).values():
                 if leg.get("symbol") == symbol:
@@ -459,13 +591,17 @@ def on_message(message):
 
 def on_open():
     print("Weekly paper WebSocket connected", flush=True)
+    # A reconnect creates a fresh subscription session.
+    subscribed.clear()
     if cycle:
-        subscribe([leg["symbol"] for leg in cycle["legs"].values()])
+        subscribe([leg["symbol"] for leg in cycle["legs"].values() if leg.get("is_open", True)])
+    subscribe([item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]])
     subscribe([UNDERLYING])
     socket_holder["socket"].keep_running()
 
 
 def on_close(message):
+    subscribed.clear()
     print(f"Weekly paper WebSocket closed: {message}", flush=True)
 
 
@@ -488,15 +624,24 @@ def close_at_end():
 
 
 def perform_cycle_exit(reason: str, start_next: bool):
-    global cycle, entry_attempted_date
+    global cycle, entry_attempted_date, pending_entry, next_entry_retry_at
     if not cycle or cycle["status"] != "ACTIVE":
         return
     previous_expiry = cycle["expiry_epoch"]
+    cycle["pending_entry"] = (
+        {"after_expiry": previous_expiry, "reason": f"NEW CYCLE AFTER {reason}"}
+        if start_next else None
+    )
     close_cycle(cycle, reason)
     if not start_next and now_ist().weekday() == 1:
         entry_attempted_date = now_ist().date()
     if start_next and now_ist().time() < END_TIME:
-        cycle = start_cycle(previous_expiry, f"NEW CYCLE AFTER {reason}")
+        pending_entry = (
+            previous_expiry, f"NEW CYCLE AFTER {reason}",
+            now_ist().weekday() == 1 and prepared_expiry is not None,
+        )
+        next_entry_retry_at = now_ist()
+        cycle = None
     else:
         cycle = None
 
@@ -527,9 +672,13 @@ def process_tick_actions():
 
 
 def main():
-    global cycle, current_spot, entry_attempted_date
+    global cycle, current_spot, entry_attempted_date, pending_entry, next_entry_retry_at
     saved_state = load_latest_state()
     cycle = saved_state if saved_state and saved_state.get("status") == "ACTIVE" else None
+    if saved_state and saved_state.get("status") == "CLOSED" and saved_state.get("pending_entry"):
+        queued = saved_state["pending_entry"]
+        pending_entry = (queued.get("after_expiry"), queued.get("reason", "RESUMED NEXT CYCLE"), False)
+        next_entry_retry_at = now_ist()
     if (
         saved_state
         and saved_state.get("status") == "CLOSED"
@@ -546,6 +695,14 @@ def main():
     # Prepare subscriptions before the market opens; start fresh weekly cycles at 09:30.
     while now_ist().time() < MARKET_OPEN and not stop_event.is_set():
         time_module.sleep(1)
+    if now_ist().weekday() == 1 and now_ist().time() < START_TIME:
+        try:
+            prepare_tuesday_entry()
+            subscribe([item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]])
+        except Exception as exc:
+            # A missing preselection must not prevent the Tuesday live quote
+            # fallback from attempting the paper entry.
+            print(f"Pre-entry preparation warning ({type(exc).__name__}); will use live quote fallback.", flush=True)
     if cycle:
         subscribe([leg["symbol"] for leg in cycle["legs"].values()])
 
@@ -563,7 +720,22 @@ def main():
         stamp = now_ist()
         if cycle is None and stamp.time() >= START_TIME and stamp.weekday() == 1 and entry_attempted_date != stamp.date():
             # First cycle, or a prior stop exit: Tuesday is the weekly entry day.
-            cycle = start_cycle(None, "TUESDAY WEEKLY ENTRY")
+            if pending_entry is None:
+                pending_entry = (None, "TUESDAY WEEKLY ENTRY", True)
+                next_entry_retry_at = stamp
+        if cycle is None and pending_entry and (next_entry_retry_at is None or stamp >= next_entry_retry_at):
+            after_epoch, reason, use_prepared = pending_entry
+            try:
+                cycle = start_cycle(after_epoch, reason, use_prepared=use_prepared)
+                pending_entry = None
+                next_entry_retry_at = None
+            except Exception as exc:
+                print(
+                    f"Paper entry still waiting for market data ({type(exc).__name__}); "
+                    f"retrying in {ENTRY_RETRY_SECONDS}s. No failed-capture sheet row was written.",
+                    flush=True,
+                )
+                next_entry_retry_at = stamp + timedelta(seconds=ENTRY_RETRY_SECONDS)
         process_tick_actions()
         if stamp.time() >= ADJUST_TIME and cycle and should_roll(cycle, stamp):
             process_tick_actions()
