@@ -78,9 +78,6 @@ DAILY_HEADERS = [
     "OI Strike Scope",
     "Entry Data Status",
     "Run Status",
-    "NIFTY Reported Volume at Entry Snapshot",
-    "Selected CE Contract Volume at Entry Snapshot",
-    "Selected PE Contract Volume at Entry Snapshot",
 ]
 
 GOOGLE_SCOPES = [
@@ -242,7 +239,6 @@ def get_optionchain_spot_quote():
         NIFTY_SYMBOL: {
             "lp": spot,
             "open_price": underlying.get("open_price", 0),
-            "volume": underlying.get("volume", ""),
         }
     }
 
@@ -290,17 +286,6 @@ def ltp_from_quote(values, label):
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid {label} LTP in quote: {values}") from exc
 
-
-def volume_from_quote(values):
-    """Return FYERS-reported cumulative volume, using zero when unavailable."""
-    raw_volume = values.get("volume")
-    if raw_volume in (None, ""):
-        return 0
-    try:
-        volume = float(raw_volume)
-        return int(volume) if volume >= 0 and volume.is_integer() else 0
-    except (TypeError, ValueError, OverflowError):
-        return 0
 
 
 def get_previous_day_ohlc(today):
@@ -505,10 +490,6 @@ def make_daily_row(run_status):
         "FYERS option chain aggregate OI for returned strike range",
         entry_data_status,
         run_status,
-        # Quote volume is cumulative as of this entry snapshot, not just the 09:30 minute.
-        volume_from_quote(nifty_values),
-        volume_from_quote(ce_values),
-        volume_from_quote(pe_values),
     ])
     return values
 
