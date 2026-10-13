@@ -37,11 +37,12 @@ TARGET_PREMIUM = 25.0
 ENTRY_CANDIDATES_PER_SIDE = 16
 ENTRY_TICK_WAIT_SECONDS = 5
 ENTRY_RETRY_SECONDS = 15
-REPLACEMENT_RATIO = 0.85
+REPLACEMENT_RATIO = 0.90
+REPLACEMENT_MAX_RATIO = 0.95
 INITIAL_DIVERGENCE = 0.50
 EOD_DIVERGENCE = 0.80
 STRADDLE_STOP = 0.10
-PROFIT_TARGET = 0.80
+NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "3000"))
 CONTRACT_QTY = int(os.getenv("WEEKLY_CONTRACT_QTY", "65"))
 SNAPSHOT_MINUTES = 30
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -51,7 +52,7 @@ HEADERS = [
     "NIFTY Spot", "CE Symbol", "CE Entry Premium", "CE LTP", "CE High Premium", "CE Low Premium",
     "PE Symbol", "PE Entry Premium", "PE LTP", "PE High Premium", "PE Low Premium",
     "Initial Combined Credit", "Realized P&L (Premium Points)", "Open P&L (Premium Points)",
-    "Net P&L (Premium Points)", "Net P&L (₹)", "Quantity (Units)", "80% Target (₹)",
+    "Net P&L (Premium Points)", "Net P&L (₹)", "Quantity (Units)", "Net Profit Target (₹)",
     "Premium Divergence %", "Adjustment Count", "Last Event", "Last Event Time (IST)", "Exit Reason", "State JSON",
 ]
 LOG_HEADERS = [
@@ -103,7 +104,12 @@ def prepare_sheet(tab_name: str, headers: list[str]):
     elif current != headers:
         rows = ws.get_all_values()
         has_records = any(any(str(c).strip() for c in r) for r in rows[1:])
-        if not has_records and len(current) == len(headers):
+        previous_headers = list(headers)
+        previous_headers[23] = "80% Target (₹)"
+        if current == previous_headers:
+            # Rename only this known header; keep every existing data row intact.
+            ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
+        elif not has_records and len(current) == len(headers):
             ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
         else:
             raise RuntimeError(f"{tab_name} has an unexpected schema; refusing to rewrite existing rows")
@@ -132,6 +138,7 @@ cycle: dict | None = None
 current_spot = ""
 entry_attempted_date: date | None = None
 prepared_expiry: str | None = None
+prepared_expiry_date: str | None = None
 prepared_candidates: dict[str, list[dict]] = {"CE": [], "PE": []}
 pending_entry: tuple[str | None, str, bool] | None = None
 next_entry_retry_at: datetime | None = None
@@ -192,10 +199,40 @@ def expiry_options(data: dict, expiry_epoch: str | None = None, *, after_date: d
     return viable[0][1], data.get("optionsChain", [])
 
 
+def chain_spot(data: dict) -> float | None:
+    """Read the underlying spot carried in FYERS option-chain data when present."""
+    for item in data.get("optionsChain", []):
+        try:
+            strike = float(item.get("strike_price"))
+            ltp = float(item.get("ltp", item.get("lp")))
+        except (TypeError, ValueError):
+            continue
+        if (not item.get("option_type") or strike == -1) and ltp > 0:
+            return ltp
+    try:
+        value = float(data.get("underlyingValue"))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def is_otm(side: str, strike: float, spot: float) -> bool:
+    return strike > spot if side == "CE" else strike < spot
+
+
+def choose_entry_candidate(candidates: list[dict]) -> dict:
+    """Prefer ₹20-₹25 contracts, then choose the available premium nearest ₹25."""
+    in_band = [c for c in candidates if 20.0 <= float(c["ltp"]) <= TARGET_PREMIUM]
+    return min(in_band or candidates, key=lambda c: abs(float(c["ltp"]) - TARGET_PREMIUM))
+
+
 def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str, dict]:
-    """Choose CE and PE independently by nearest available option-chain LTP."""
+    """Choose one OTM CE and PE, preferring each side's ₹20-₹25 contracts nearest ₹25."""
     data = option_chain(expiry_epoch)
     chain = data.get("optionsChain", [])
+    spot = chain_spot(data)
+    if spot is None:
+        spot = quote([UNDERLYING])[UNDERLYING]
     chosen = {}
     for side in ("CE", "PE"):
         candidates = []
@@ -208,11 +245,11 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
                 strike = float(item.get("strike_price"))
             except (TypeError, ValueError):
                 continue
-            if symbol and ltp > 0:
+            if symbol and ltp > 0 and is_otm(side, strike, spot):
                 candidates.append({"symbol": symbol, "ltp": ltp, "strike": strike, "side": side})
         if not candidates:
-            raise RuntimeError(f"No {side} contracts in the selected expiry chain")
-        chosen[side] = min(candidates, key=lambda c: abs(c["ltp"] - premiums[side]))
+            raise RuntimeError(f"No OTM {side} contracts in the selected expiry chain")
+        chosen[side] = choose_entry_candidate(candidates)
     refreshed = quote([chosen["CE"]["symbol"], chosen["PE"]["symbol"]])
     for side in ("CE", "PE"):
         chosen[side]["ltp"] = refreshed[chosen[side]["symbol"]]
@@ -222,8 +259,11 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
 
 
 def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
-    """Prepare a bounded set of near-₹25 contracts before the 09:30 entry."""
+    """Prepare OTM CE/PE candidates before the 09:30 entry."""
     data = option_chain(expiry_epoch)
+    spot = chain_spot(data)
+    if spot is None:
+        spot = quote([UNDERLYING])[UNDERLYING]
     by_side: dict[str, list[dict]] = {"CE": [], "PE": []}
     for item in data.get("optionsChain", []):
         side = item.get("option_type")
@@ -235,20 +275,21 @@ def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
             strike = float(item.get("strike_price"))
         except (TypeError, ValueError):
             continue
-        if symbol and premium > 0:
+        if symbol and premium > 0 and is_otm(side, strike, spot):
             by_side[side].append({"symbol": symbol, "ltp": premium, "strike": strike, "side": side})
     for side in by_side:
         by_side[side] = sorted(
-            by_side[side], key=lambda c: abs(c["ltp"] - TARGET_PREMIUM)
+            by_side[side],
+            key=lambda c: (0 if 20.0 <= c["ltp"] <= TARGET_PREMIUM else 1, abs(c["ltp"] - TARGET_PREMIUM)),
         )[:ENTRY_CANDIDATES_PER_SIDE]
         if not by_side[side]:
-            raise RuntimeError(f"No {side} candidates in the prepared weekly expiry")
+            raise RuntimeError(f"No OTM {side} candidates in the prepared weekly expiry")
     return by_side
 
 
 def prepare_tuesday_entry() -> None:
     """Resolve expiry and candidate symbols before market entry time."""
-    global prepared_expiry, prepared_candidates
+    global prepared_expiry, prepared_expiry_date, prepared_candidates
     current = now_ist()
     if current.weekday() != 1 or current.time() >= START_TIME:
         return
@@ -258,6 +299,7 @@ def prepare_tuesday_entry() -> None:
         prepared_expiry, _ = expiry_options(expiries, active_expiry)
     else:
         prepared_expiry, _ = expiry_options(expiries, after_date=current.date())
+    prepared_expiry_date = next((entry["date"] for entry in expiries.get("expiryData", []) if str(entry.get("expiry")) == str(prepared_expiry)), "")
     prepared_candidates = candidate_contracts(prepared_expiry)
     symbols = [item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]]
     print(
@@ -274,6 +316,11 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
 
     pool = prepared_candidates
     target_dt = datetime.combine(now_ist().date(), START_TIME, tzinfo=IST)
+    spot_time = latest_at.get(UNDERLYING)
+    if not current_spot or not spot_time or (now_ist() - spot_time).total_seconds() > 5:
+        entry_spot = quote([UNDERLYING])[UNDERLYING]
+    else:
+        entry_spot = float(current_spot)
     # If the runner starts late, never select a pre-09:30 tick as the entry.
     deadline = max(now_ist(), target_dt) + timedelta(seconds=ENTRY_TICK_WAIT_SECONDS)
     while now_ist() < deadline:
@@ -286,9 +333,10 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
                 and latest_at[item["symbol"]] >= target_dt
                 and item["symbol"] in latest
                 and latest[item["symbol"]] > 0
+                and is_otm(side, float(item["strike"]), entry_spot)
             ]
             if fresh:
-                chosen[side] = min(fresh, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+                chosen[side] = choose_entry_candidate(fresh)
         if len(chosen) == 2:
             captured_at = max(latest_at[chosen[side]["symbol"]] for side in ("CE", "PE"))
             return chosen, captured_at, "post-09:30 WebSocket tick"
@@ -301,36 +349,82 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
         candidates = [
             {**item, "ltp": values[item["symbol"]]}
             for item in pool[side]
-            if item["symbol"] in values and values[item["symbol"]] > 0
+            if item["symbol"] in values
+            and values[item["symbol"]] > 0
+            and is_otm(side, float(item["strike"]), entry_spot)
         ]
         if not candidates:
-            raise RuntimeError(f"No usable {side} quote in the prepared candidate set")
-        chosen[side] = min(candidates, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+            raise RuntimeError(f"No usable OTM {side} quote in the prepared candidate set")
+        chosen[side] = choose_entry_candidate(candidates)
     return chosen, now_ist(), "FYERS quote fallback"
 
 
+def strike_for_leg(leg: dict) -> float | None:
+    """Return strike metadata, falling back to the strike suffix in a FYERS symbol."""
+    try:
+        value = leg.get("strike")
+        if value is not None and str(value).strip():
+            return float(value)
+    except (TypeError, ValueError):
+        pass
+    symbol = str(leg.get("symbol", ""))
+    suffix = symbol[-2:]
+    if suffix not in ("CE", "PE"):
+        return None
+    digits = ""
+    for char in reversed(symbol[:-2]):
+        if not char.isdigit():
+            break
+        digits = char + digits
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
+
+
+def is_straddle(s: dict) -> bool:
+    ce_strike = strike_for_leg(s.get("legs", {}).get("CE", {}))
+    pe_strike = strike_for_leg(s.get("legs", {}).get("PE", {}))
+    return ce_strike is not None and pe_strike is not None and ce_strike == pe_strike
+
+
+def normalize_phase(s: dict) -> bool:
+    """Make phase/stop state agree with the actual CE and PE strikes."""
+    old_phase = s.get("phase")
+    old_credit = s.get("straddle_credit")
+    if is_straddle(s):
+        s["phase"] = "STRADDLE"
+        if s.get("straddle_credit") is None:
+            s["straddle_credit"] = round(sum(float(s["legs"][side].get("credit", 0)) for side in ("CE", "PE")), 2)
+    else:
+        s["phase"] = "STRANGLE"
+        s["straddle_credit"] = None
+    return old_phase != s.get("phase") or old_credit != s.get("straddle_credit")
+
+
 def make_cycle(
-    expiry_epoch: str, ce: dict, pe: dict, reason: str,
+    expiry_epoch: str, expiry_label: str, ce: dict, pe: dict, reason: str,
     entry_time: datetime, capture_method: str,
 ) -> dict:
     stamp = entry_time
     initial = round(ce["ltp"] + pe["ltp"], 2)
+    same_strike = strike_for_leg(ce) is not None and strike_for_leg(ce) == strike_for_leg(pe)
     return {
         "cycle_id": f"{stamp:%Y%m%d}-{uuid.uuid4().hex[:8]}",
         "start_date": stamp.date().isoformat(),
         "start_time": fmt(stamp),
         "entry_capture_method": capture_method,
         "expiry_epoch": str(expiry_epoch),
-        "expiry": next((e["date"] for e in option_chain().get("expiryData", []) if str(e.get("expiry")) == str(expiry_epoch)), ""),
+        "expiry": expiry_label,
         "status": "ACTIVE",
-        "phase": "STRANGLE",
+        "phase": "STRADDLE" if same_strike else "STRANGLE",
         "legs": {
-            "CE": {"symbol": ce["symbol"], "credit": ce["ltp"], "ltp": ce["ltp"], "high": ce["ltp"], "low": ce["ltp"]},
-            "PE": {"symbol": pe["symbol"], "credit": pe["ltp"], "ltp": pe["ltp"], "high": pe["ltp"], "low": pe["ltp"]},
+            "CE": {"symbol": ce["symbol"], "strike": strike_for_leg(ce), "credit": ce["ltp"], "ltp": ce["ltp"], "high": ce["ltp"], "low": ce["ltp"]},
+            "PE": {"symbol": pe["symbol"], "strike": strike_for_leg(pe), "credit": pe["ltp"], "ltp": pe["ltp"], "high": pe["ltp"], "low": pe["ltp"]},
         },
         "initial_credit": initial,
         "realized_points": 0.0,
-        "straddle_credit": None,
+        "straddle_credit": initial if same_strike else None,
         "adjustment_count": 0,
         "last_event": reason,
         "last_event_time": fmt(stamp),
@@ -386,7 +480,7 @@ def snapshot_row(s: dict, event: str = "") -> list:
     ce = s["legs"].get("CE", {})
     pe = s["legs"].get("PE", {})
     open_points, net_points, net_rupees = p_and_l(s)
-    target_rupees = round(float(s["initial_credit"]) * CONTRACT_QTY * PROFIT_TARGET, 2)
+    target_rupees = round(NET_PROFIT_TARGET_RUPEES, 2)
     return [
         s["cycle_id"], fmt(stamp), s["start_date"], s["expiry"], s["status"], s["phase"], current_spot,
         ce.get("symbol", ""), ce.get("credit", ""), ce.get("ltp", ""), ce.get("high", ""), ce.get("low", ""),
@@ -480,17 +574,24 @@ def expiry_after(epoch: str) -> str:
 
 def start_cycle(after_epoch: str | None, event: str, use_prepared: bool = False):
     global entry_attempted_date
-    data = option_chain()
-    if after_epoch is None:
-        epoch, _ = expiry_options(data, after_date=now_ist().date())
-    else:
-        epoch, _ = expiry_options(data, after_epoch)
-    if use_prepared and str(epoch) == str(prepared_expiry):
+    use_prepared_expiry = (
+        use_prepared and prepared_expiry is not None
+        and (after_epoch is None or int(prepared_expiry) > int(after_epoch))
+    )
+    if use_prepared_expiry:
+        epoch = prepared_expiry
+        expiry_label = prepared_expiry_date or ""
         contracts, captured_at, capture_method = capture_prepared_contracts(epoch)
     else:
+        data = option_chain()
+        if after_epoch is None:
+            epoch, _ = expiry_options(data, after_date=now_ist().date())
+        else:
+            epoch, _ = expiry_options(data, after_epoch)
+        expiry_label = next((entry["date"] for entry in data.get("expiryData", []) if str(entry.get("expiry")) == str(epoch)), "")
         contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
         captured_at, capture_method = now_ist(), "FYERS quote snapshot"
-    s = make_cycle(epoch, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
+    s = make_cycle(epoch, expiry_label, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
     for side in ("CE", "PE"):
         leg = s["legs"][side]
         record_position_event(
@@ -527,46 +628,65 @@ def roll_low_leg(s: dict, reason: str):
     high_ltp = float(s["legs"][high_side]["ltp"])
     low_leg = s["legs"][low_side]
     target = round(high_ltp * REPLACEMENT_RATIO, 2)
-    data = option_chain(s["expiry_epoch"])
-    candidates = []
-    for item in data.get("optionsChain", []):
-        if item.get("option_type") != low_side or item.get("symbol") == low_leg["symbol"]:
-            continue
-        try:
-            premium = float(item.get("ltp", item.get("lp")))
-        except (TypeError, ValueError):
-            continue
-        if item.get("symbol") and premium > 0:
-            candidates.append((abs(premium - target), item.get("symbol"), premium))
-    if not candidates:
-        print("Adjustment skipped: no replacement contract found in the same expiry", flush=True)
+    minimum_premium = high_ltp * REPLACEMENT_RATIO
+    maximum_premium = high_ltp * REPLACEMENT_MAX_RATIO
+    try:
+        data = option_chain(s["expiry_epoch"])
+        candidates = []
+        for item in data.get("optionsChain", []):
+            if item.get("option_type") != low_side or item.get("symbol") == low_leg["symbol"]:
+                continue
+            try:
+                premium = float(item.get("ltp", item.get("lp")))
+                strike = float(item.get("strike_price"))
+            except (TypeError, ValueError):
+                continue
+            if item.get("symbol") and premium > 0:
+                candidates.append((abs(premium - target), item.get("symbol"), premium, strike))
+        eligible = [candidate for candidate in candidates if minimum_premium <= candidate[2] <= maximum_premium]
+        if not eligible:
+            last_adjustment_at = now_ist()
+            print("Adjustment skipped: no same-expiry replacement is within 90%-95% of the retained leg; monitoring current legs", flush=True)
+            return
+        _, new_symbol, _, new_strike = min(eligible, key=lambda candidate: abs(candidate[2] - target))
+        new_ltp = quote([new_symbol])[new_symbol]
+    except Exception as exc:
+        last_adjustment_at = now_ist()
+        print(
+            f"Adjustment market-data request failed ({type(exc).__name__}); keeping current legs and continuing to monitor; "
+            f"will retry after the cooldown.", flush=True,
+        )
         return
-    _, new_symbol, _ = min(candidates)
-    new_ltp = quote([new_symbol])[new_symbol]
+
     old_symbol = low_leg["symbol"]
+    was_straddle = is_straddle(s)
     close_leg(s, low_side, float(low_leg["ltp"]), reason)
-    s["legs"][low_side] = {"symbol": new_symbol, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
+    s["legs"][low_side] = {"symbol": new_symbol, "strike": new_strike, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
     s["adjustment_count"] = int(s["adjustment_count"]) + 1
-    s["phase"] = "STRADDLE"
+    if is_straddle(s):
+        s["phase"] = "STRADDLE"
+        if not was_straddle:
+            # Start the combined stop only when the actual contracts share a strike.
+            s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
+    else:
+        s["phase"] = "STRANGLE"
+        s["straddle_credit"] = None
     record_position_event(s, "ADJUSTMENT ENTRY", "SELL TO OPEN", low_side, new_symbol, new_ltp, reason)
-    if s.get("straddle_credit") is None:
-        # Stop reference is the premium received for the retained high leg
-        # plus the replacement leg, not the high leg's market value at roll.
-        s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
     subscribe([new_symbol])
     unsubscribe([old_symbol])
     last_adjustment_at = now_ist()
-    log_state(s, f"{reason}: closed {low_side}; sold replacement {new_symbol} near 85% of {high_side}")
+    log_state(s, f"{reason}: closed {low_side}; sold replacement {new_symbol} at 90%-95% of {high_side}")
     print(f"Paper adjustment: {old_symbol} bought back @{low_leg['ltp']:.2f}; {new_symbol} sold @{new_ltp:.2f}; held {high_side} unchanged", flush=True)
 
 
 def should_roll(s: dict, observed_time: datetime) -> bool:
-    if s["status"] != "ACTIVE" or len(s.get("legs", {})) != 2:
+    if s["status"] != "ACTIVE" or len(s.get("legs", {})) != 2 or is_straddle(s):
         return False
     ratio = divergence(s)
-    if observed_time.time() >= ADJUST_TIME and ratio >= EOD_DIVERGENCE:
-        return True
-    return ratio >= INITIAL_DIVERGENCE
+    # At 15:25 use only the stronger end-of-day threshold. Earlier in the
+    # session, the ordinary 50% divergence rule applies.
+    threshold = EOD_DIVERGENCE if observed_time.time() >= ADJUST_TIME else INITIAL_DIVERGENCE
+    return ratio >= threshold
 
 
 def on_message(message):
@@ -656,13 +776,13 @@ def process_tick_actions():
         perform_cycle_exit("EXPIRY ROLLOVER", True)
         return
     if len(cycle["legs"]) == 2:
-        if cycle.get("straddle_credit") and sum(float(leg.get("ltp", 0)) for leg in cycle["legs"].values()) >= float(cycle["straddle_credit"]) * (1 + STRADDLE_STOP):
+        if cycle.get("phase") == "STRADDLE" and is_straddle(cycle) and cycle.get("straddle_credit") and sum(float(leg.get("ltp", 0)) for leg in cycle["legs"].values()) >= float(cycle["straddle_credit"]) * (1 + STRADDLE_STOP):
             perform_cycle_exit("10% STRADDLE COMBINED PREMIUM STOP", False)
             return
         _, net_points, net_rupees = p_and_l(cycle)
-        target = float(cycle["initial_credit"]) * CONTRACT_QTY * PROFIT_TARGET
+        target = NET_PROFIT_TARGET_RUPEES
         if net_rupees >= target:
-            perform_cycle_exit("80% INITIAL CREDIT NET PROFIT TARGET", True)
+            perform_cycle_exit("₹3,000 NET CYCLE PROFIT TARGET", True)
             return
         if should_roll(cycle, stamp):
             roll_low_leg(cycle, "15:25 DIVERGENCE" if stamp.time() >= ADJUST_TIME else "50% DIVERGENCE")
@@ -675,6 +795,9 @@ def main():
     global cycle, current_spot, entry_attempted_date, pending_entry, next_entry_retry_at
     saved_state = load_latest_state()
     cycle = saved_state if saved_state and saved_state.get("status") == "ACTIVE" else None
+    if cycle and normalize_phase(cycle):
+        log_state(cycle, "RESTORED PHASE FROM ACTUAL CE/PE STRIKES")
+        print(f"Restored cycle phase as {cycle['phase']} from actual contract strikes", flush=True)
     if saved_state and saved_state.get("status") == "CLOSED" and saved_state.get("pending_entry"):
         queued = saved_state["pending_entry"]
         pending_entry = (queued.get("after_expiry"), queued.get("reason", "RESUMED NEXT CYCLE"), False)
@@ -692,17 +815,19 @@ def main():
     else:
         print("No active weekly paper cycle found", flush=True)
 
-    # Prepare subscriptions before the market opens; start fresh weekly cycles at 09:30.
-    while now_ist().time() < MARKET_OPEN and not stop_event.is_set():
-        time_module.sleep(1)
+    # Prepare Tuesday's candidate symbols before 09:15 so API preparation does
+    # not delay the live market-data connection. Entry remains at 09:30.
     if now_ist().weekday() == 1 and now_ist().time() < START_TIME:
         try:
             prepare_tuesday_entry()
-            subscribe([item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]])
         except Exception as exc:
             # A missing preselection must not prevent the Tuesday live quote
             # fallback from attempting the paper entry.
             print(f"Pre-entry preparation warning ({type(exc).__name__}); will use live quote fallback.", flush=True)
+
+    # Connect at market open for live premium tracking; Tuesday entry is still 09:30.
+    while now_ist().time() < MARKET_OPEN and not stop_event.is_set():
+        time_module.sleep(1)
     if cycle:
         subscribe([leg["symbol"] for leg in cycle["legs"].values()])
 
