@@ -37,11 +37,12 @@ TARGET_PREMIUM = 25.0
 ENTRY_CANDIDATES_PER_SIDE = 16
 ENTRY_TICK_WAIT_SECONDS = 5
 ENTRY_RETRY_SECONDS = 15
-REPLACEMENT_RATIO = 0.85
+REPLACEMENT_RATIO = 0.90
+REPLACEMENT_MAX_RATIO = 0.95
 INITIAL_DIVERGENCE = 0.50
 EOD_DIVERGENCE = 0.80
 STRADDLE_STOP = 0.10
-NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "2600"))
+NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "3000"))
 CONTRACT_QTY = int(os.getenv("WEEKLY_CONTRACT_QTY", "65"))
 SNAPSHOT_MINUTES = 30
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -137,6 +138,7 @@ cycle: dict | None = None
 current_spot = ""
 entry_attempted_date: date | None = None
 prepared_expiry: str | None = None
+prepared_expiry_date: str | None = None
 prepared_candidates: dict[str, list[dict]] = {"CE": [], "PE": []}
 pending_entry: tuple[str | None, str, bool] | None = None
 next_entry_retry_at: datetime | None = None
@@ -253,7 +255,7 @@ def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
 
 def prepare_tuesday_entry() -> None:
     """Resolve expiry and candidate symbols before market entry time."""
-    global prepared_expiry, prepared_candidates
+    global prepared_expiry, prepared_expiry_date, prepared_candidates
     current = now_ist()
     if current.weekday() != 1 or current.time() >= START_TIME:
         return
@@ -263,6 +265,7 @@ def prepare_tuesday_entry() -> None:
         prepared_expiry, _ = expiry_options(expiries, active_expiry)
     else:
         prepared_expiry, _ = expiry_options(expiries, after_date=current.date())
+    prepared_expiry_date = next((entry["date"] for entry in expiries.get("expiryData", []) if str(entry.get("expiry")) == str(prepared_expiry)), "")
     prepared_candidates = candidate_contracts(prepared_expiry)
     symbols = [item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]]
     print(
@@ -358,7 +361,7 @@ def normalize_phase(s: dict) -> bool:
 
 
 def make_cycle(
-    expiry_epoch: str, ce: dict, pe: dict, reason: str,
+    expiry_epoch: str, expiry_label: str, ce: dict, pe: dict, reason: str,
     entry_time: datetime, capture_method: str,
 ) -> dict:
     stamp = entry_time
@@ -370,7 +373,7 @@ def make_cycle(
         "start_time": fmt(stamp),
         "entry_capture_method": capture_method,
         "expiry_epoch": str(expiry_epoch),
-        "expiry": next((e["date"] for e in option_chain().get("expiryData", []) if str(e.get("expiry")) == str(expiry_epoch)), ""),
+        "expiry": expiry_label,
         "status": "ACTIVE",
         "phase": "STRADDLE" if same_strike else "STRANGLE",
         "legs": {
@@ -529,17 +532,24 @@ def expiry_after(epoch: str) -> str:
 
 def start_cycle(after_epoch: str | None, event: str, use_prepared: bool = False):
     global entry_attempted_date
-    data = option_chain()
-    if after_epoch is None:
-        epoch, _ = expiry_options(data, after_date=now_ist().date())
-    else:
-        epoch, _ = expiry_options(data, after_epoch)
-    if use_prepared and str(epoch) == str(prepared_expiry):
+    use_prepared_expiry = (
+        use_prepared and prepared_expiry is not None
+        and (after_epoch is None or int(prepared_expiry) > int(after_epoch))
+    )
+    if use_prepared_expiry:
+        epoch = prepared_expiry
+        expiry_label = prepared_expiry_date or ""
         contracts, captured_at, capture_method = capture_prepared_contracts(epoch)
     else:
+        data = option_chain()
+        if after_epoch is None:
+            epoch, _ = expiry_options(data, after_date=now_ist().date())
+        else:
+            epoch, _ = expiry_options(data, after_epoch)
+        expiry_label = next((entry["date"] for entry in data.get("expiryData", []) if str(entry.get("expiry")) == str(epoch)), "")
         contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
         captured_at, capture_method = now_ist(), "FYERS quote snapshot"
-    s = make_cycle(epoch, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
+    s = make_cycle(epoch, expiry_label, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
     for side in ("CE", "PE"):
         leg = s["legs"][side]
         record_position_event(
@@ -576,6 +586,8 @@ def roll_low_leg(s: dict, reason: str):
     high_ltp = float(s["legs"][high_side]["ltp"])
     low_leg = s["legs"][low_side]
     target = round(high_ltp * REPLACEMENT_RATIO, 2)
+    minimum_premium = high_ltp * REPLACEMENT_RATIO
+    maximum_premium = high_ltp * REPLACEMENT_MAX_RATIO
     try:
         data = option_chain(s["expiry_epoch"])
         candidates = []
@@ -589,11 +601,12 @@ def roll_low_leg(s: dict, reason: str):
                 continue
             if item.get("symbol") and premium > 0:
                 candidates.append((abs(premium - target), item.get("symbol"), premium, strike))
-        if not candidates:
+        eligible = [candidate for candidate in candidates if minimum_premium <= candidate[2] <= maximum_premium]
+        if not eligible:
             last_adjustment_at = now_ist()
-            print("Adjustment skipped: no replacement contract found in the same expiry; monitoring current legs", flush=True)
+            print("Adjustment skipped: no same-expiry replacement is within 90%-95% of the retained leg; monitoring current legs", flush=True)
             return
-        _, new_symbol, _, new_strike = min(candidates)
+        _, new_symbol, _, new_strike = min(eligible, key=lambda candidate: abs(candidate[2] - target))
         new_ltp = quote([new_symbol])[new_symbol]
     except Exception as exc:
         last_adjustment_at = now_ist()
@@ -625,7 +638,7 @@ def roll_low_leg(s: dict, reason: str):
 
 
 def should_roll(s: dict, observed_time: datetime) -> bool:
-    if s["status"] != "ACTIVE" or len(s.get("legs", {})) != 2:
+    if s["status"] != "ACTIVE" or len(s.get("legs", {})) != 2 or is_straddle(s):
         return False
     ratio = divergence(s)
     if observed_time.time() >= ADJUST_TIME and ratio >= EOD_DIVERGENCE:
