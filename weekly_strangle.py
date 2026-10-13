@@ -199,10 +199,40 @@ def expiry_options(data: dict, expiry_epoch: str | None = None, *, after_date: d
     return viable[0][1], data.get("optionsChain", [])
 
 
+def chain_spot(data: dict) -> float | None:
+    """Read the underlying spot carried in FYERS option-chain data when present."""
+    for item in data.get("optionsChain", []):
+        try:
+            strike = float(item.get("strike_price"))
+            ltp = float(item.get("ltp", item.get("lp")))
+        except (TypeError, ValueError):
+            continue
+        if (not item.get("option_type") or strike == -1) and ltp > 0:
+            return ltp
+    try:
+        value = float(data.get("underlyingValue"))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def is_otm(side: str, strike: float, spot: float) -> bool:
+    return strike > spot if side == "CE" else strike < spot
+
+
+def choose_entry_candidate(candidates: list[dict]) -> dict:
+    """Prefer ₹20-₹25 contracts, then choose the available premium nearest ₹25."""
+    in_band = [c for c in candidates if 20.0 <= float(c["ltp"]) <= TARGET_PREMIUM]
+    return min(in_band or candidates, key=lambda c: abs(float(c["ltp"]) - TARGET_PREMIUM))
+
+
 def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str, dict]:
-    """Choose CE and PE independently by nearest available option-chain LTP."""
+    """Choose one OTM CE and PE, preferring each side's ₹20-₹25 contracts nearest ₹25."""
     data = option_chain(expiry_epoch)
     chain = data.get("optionsChain", [])
+    spot = chain_spot(data)
+    if spot is None:
+        spot = quote([UNDERLYING])[UNDERLYING]
     chosen = {}
     for side in ("CE", "PE"):
         candidates = []
@@ -215,11 +245,11 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
                 strike = float(item.get("strike_price"))
             except (TypeError, ValueError):
                 continue
-            if symbol and ltp > 0:
+            if symbol and ltp > 0 and is_otm(side, strike, spot):
                 candidates.append({"symbol": symbol, "ltp": ltp, "strike": strike, "side": side})
         if not candidates:
-            raise RuntimeError(f"No {side} contracts in the selected expiry chain")
-        chosen[side] = min(candidates, key=lambda c: abs(c["ltp"] - premiums[side]))
+            raise RuntimeError(f"No OTM {side} contracts in the selected expiry chain")
+        chosen[side] = choose_entry_candidate(candidates)
     refreshed = quote([chosen["CE"]["symbol"], chosen["PE"]["symbol"]])
     for side in ("CE", "PE"):
         chosen[side]["ltp"] = refreshed[chosen[side]["symbol"]]
@@ -229,8 +259,11 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
 
 
 def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
-    """Prepare a bounded set of near-₹25 contracts before the 09:30 entry."""
+    """Prepare OTM CE/PE candidates before the 09:30 entry."""
     data = option_chain(expiry_epoch)
+    spot = chain_spot(data)
+    if spot is None:
+        spot = quote([UNDERLYING])[UNDERLYING]
     by_side: dict[str, list[dict]] = {"CE": [], "PE": []}
     for item in data.get("optionsChain", []):
         side = item.get("option_type")
@@ -242,14 +275,15 @@ def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
             strike = float(item.get("strike_price"))
         except (TypeError, ValueError):
             continue
-        if symbol and premium > 0:
+        if symbol and premium > 0 and is_otm(side, strike, spot):
             by_side[side].append({"symbol": symbol, "ltp": premium, "strike": strike, "side": side})
     for side in by_side:
         by_side[side] = sorted(
-            by_side[side], key=lambda c: abs(c["ltp"] - TARGET_PREMIUM)
+            by_side[side],
+            key=lambda c: (0 if 20.0 <= c["ltp"] <= TARGET_PREMIUM else 1, abs(c["ltp"] - TARGET_PREMIUM)),
         )[:ENTRY_CANDIDATES_PER_SIDE]
         if not by_side[side]:
-            raise RuntimeError(f"No {side} candidates in the prepared weekly expiry")
+            raise RuntimeError(f"No OTM {side} candidates in the prepared weekly expiry")
     return by_side
 
 
@@ -282,6 +316,11 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
 
     pool = prepared_candidates
     target_dt = datetime.combine(now_ist().date(), START_TIME, tzinfo=IST)
+    spot_time = latest_at.get(UNDERLYING)
+    if not current_spot or not spot_time or (now_ist() - spot_time).total_seconds() > 5:
+        entry_spot = quote([UNDERLYING])[UNDERLYING]
+    else:
+        entry_spot = float(current_spot)
     # If the runner starts late, never select a pre-09:30 tick as the entry.
     deadline = max(now_ist(), target_dt) + timedelta(seconds=ENTRY_TICK_WAIT_SECONDS)
     while now_ist() < deadline:
@@ -294,9 +333,10 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
                 and latest_at[item["symbol"]] >= target_dt
                 and item["symbol"] in latest
                 and latest[item["symbol"]] > 0
+                and is_otm(side, float(item["strike"]), entry_spot)
             ]
             if fresh:
-                chosen[side] = min(fresh, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+                chosen[side] = choose_entry_candidate(fresh)
         if len(chosen) == 2:
             captured_at = max(latest_at[chosen[side]["symbol"]] for side in ("CE", "PE"))
             return chosen, captured_at, "post-09:30 WebSocket tick"
@@ -309,11 +349,13 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
         candidates = [
             {**item, "ltp": values[item["symbol"]]}
             for item in pool[side]
-            if item["symbol"] in values and values[item["symbol"]] > 0
+            if item["symbol"] in values
+            and values[item["symbol"]] > 0
+            and is_otm(side, float(item["strike"]), entry_spot)
         ]
         if not candidates:
-            raise RuntimeError(f"No usable {side} quote in the prepared candidate set")
-        chosen[side] = min(candidates, key=lambda item: abs(item["ltp"] - TARGET_PREMIUM))
+            raise RuntimeError(f"No usable OTM {side} quote in the prepared candidate set")
+        chosen[side] = choose_entry_candidate(candidates)
     return chosen, now_ist(), "FYERS quote fallback"
 
 
@@ -633,7 +675,7 @@ def roll_low_leg(s: dict, reason: str):
     subscribe([new_symbol])
     unsubscribe([old_symbol])
     last_adjustment_at = now_ist()
-    log_state(s, f"{reason}: closed {low_side}; sold replacement {new_symbol} near 85% of {high_side}")
+    log_state(s, f"{reason}: closed {low_side}; sold replacement {new_symbol} at 90%-95% of {high_side}")
     print(f"Paper adjustment: {old_symbol} bought back @{low_leg['ltp']:.2f}; {new_symbol} sold @{new_ltp:.2f}; held {high_side} unchanged", flush=True)
 
 
@@ -739,7 +781,7 @@ def process_tick_actions():
         _, net_points, net_rupees = p_and_l(cycle)
         target = NET_PROFIT_TARGET_RUPEES
         if net_rupees >= target:
-            perform_cycle_exit("80% INITIAL CREDIT NET PROFIT TARGET", True)
+            perform_cycle_exit("₹3,000 NET CYCLE PROFIT TARGET", True)
             return
         if should_roll(cycle, stamp):
             roll_low_leg(cycle, "15:25 DIVERGENCE" if stamp.time() >= ADJUST_TIME else "50% DIVERGENCE")
