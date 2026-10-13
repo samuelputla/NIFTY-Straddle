@@ -41,7 +41,7 @@ REPLACEMENT_RATIO = 0.85
 INITIAL_DIVERGENCE = 0.50
 EOD_DIVERGENCE = 0.80
 STRADDLE_STOP = 0.10
-PROFIT_TARGET = 0.80
+NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "2600"))
 CONTRACT_QTY = int(os.getenv("WEEKLY_CONTRACT_QTY", "65"))
 SNAPSHOT_MINUTES = 30
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -51,7 +51,7 @@ HEADERS = [
     "NIFTY Spot", "CE Symbol", "CE Entry Premium", "CE LTP", "CE High Premium", "CE Low Premium",
     "PE Symbol", "PE Entry Premium", "PE LTP", "PE High Premium", "PE Low Premium",
     "Initial Combined Credit", "Realized P&L (Premium Points)", "Open P&L (Premium Points)",
-    "Net P&L (Premium Points)", "Net P&L (₹)", "Quantity (Units)", "80% Target (₹)",
+    "Net P&L (Premium Points)", "Net P&L (₹)", "Quantity (Units)", "Net Profit Target (₹)",
     "Premium Divergence %", "Adjustment Count", "Last Event", "Last Event Time (IST)", "Exit Reason", "State JSON",
 ]
 LOG_HEADERS = [
@@ -103,7 +103,12 @@ def prepare_sheet(tab_name: str, headers: list[str]):
     elif current != headers:
         rows = ws.get_all_values()
         has_records = any(any(str(c).strip() for c in r) for r in rows[1:])
-        if not has_records and len(current) == len(headers):
+        previous_headers = list(headers)
+        previous_headers[23] = "80% Target (₹)"
+        if current == previous_headers:
+            # Rename only this known header; keep every existing data row intact.
+            ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
+        elif not has_records and len(current) == len(headers):
             ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
         else:
             raise RuntimeError(f"{tab_name} has an unexpected schema; refusing to rewrite existing rows")
@@ -430,7 +435,7 @@ def snapshot_row(s: dict, event: str = "") -> list:
     ce = s["legs"].get("CE", {})
     pe = s["legs"].get("PE", {})
     open_points, net_points, net_rupees = p_and_l(s)
-    target_rupees = round(float(s["initial_credit"]) * CONTRACT_QTY * PROFIT_TARGET, 2)
+    target_rupees = round(NET_PROFIT_TARGET_RUPEES, 2)
     return [
         s["cycle_id"], fmt(stamp), s["start_date"], s["expiry"], s["status"], s["phase"], current_spot,
         ce.get("symbol", ""), ce.get("credit", ""), ce.get("ltp", ""), ce.get("high", ""), ce.get("low", ""),
@@ -719,7 +724,7 @@ def process_tick_actions():
             perform_cycle_exit("10% STRADDLE COMBINED PREMIUM STOP", False)
             return
         _, net_points, net_rupees = p_and_l(cycle)
-        target = float(cycle["initial_credit"]) * CONTRACT_QTY * PROFIT_TARGET
+        target = NET_PROFIT_TARGET_RUPEES
         if net_rupees >= target:
             perform_cycle_exit("80% INITIAL CREDIT NET PROFIT TARGET", True)
             return
