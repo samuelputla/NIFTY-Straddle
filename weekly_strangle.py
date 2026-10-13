@@ -683,9 +683,10 @@ def should_roll(s: dict, observed_time: datetime) -> bool:
     if s["status"] != "ACTIVE" or len(s.get("legs", {})) != 2 or is_straddle(s):
         return False
     ratio = divergence(s)
-    if observed_time.time() >= ADJUST_TIME and ratio >= EOD_DIVERGENCE:
-        return True
-    return ratio >= INITIAL_DIVERGENCE
+    # At 15:25 use only the stronger end-of-day threshold. Earlier in the
+    # session, the ordinary 50% divergence rule applies.
+    threshold = EOD_DIVERGENCE if observed_time.time() >= ADJUST_TIME else INITIAL_DIVERGENCE
+    return ratio >= threshold
 
 
 def on_message(message):
@@ -814,17 +815,19 @@ def main():
     else:
         print("No active weekly paper cycle found", flush=True)
 
-    # Prepare subscriptions before the market opens; start fresh weekly cycles at 09:30.
-    while now_ist().time() < MARKET_OPEN and not stop_event.is_set():
-        time_module.sleep(1)
+    # Prepare Tuesday's candidate symbols before 09:15 so API preparation does
+    # not delay the live market-data connection. Entry remains at 09:30.
     if now_ist().weekday() == 1 and now_ist().time() < START_TIME:
         try:
             prepare_tuesday_entry()
-            subscribe([item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]])
         except Exception as exc:
             # A missing preselection must not prevent the Tuesday live quote
             # fallback from attempting the paper entry.
             print(f"Pre-entry preparation warning ({type(exc).__name__}); will use live quote fallback.", flush=True)
+
+    # Connect at market open for live premium tracking; Tuesday entry is still 09:30.
+    while now_ist().time() < MARKET_OPEN and not stop_event.is_set():
+        time_module.sleep(1)
     if cycle:
         subscribe([leg["symbol"] for leg in cycle["legs"].values()])
 
