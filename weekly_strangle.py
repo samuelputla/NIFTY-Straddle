@@ -309,12 +309,56 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
     return chosen, now_ist(), "FYERS quote fallback"
 
 
+def strike_for_leg(leg: dict) -> float | None:
+    """Return strike metadata, falling back to the strike suffix in a FYERS symbol."""
+    try:
+        value = leg.get("strike")
+        if value is not None and str(value).strip():
+            return float(value)
+    except (TypeError, ValueError):
+        pass
+    symbol = str(leg.get("symbol", ""))
+    suffix = symbol[-2:]
+    if suffix not in ("CE", "PE"):
+        return None
+    digits = ""
+    for char in reversed(symbol[:-2]):
+        if not char.isdigit():
+            break
+        digits = char + digits
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
+
+
+def is_straddle(s: dict) -> bool:
+    ce_strike = strike_for_leg(s.get("legs", {}).get("CE", {}))
+    pe_strike = strike_for_leg(s.get("legs", {}).get("PE", {}))
+    return ce_strike is not None and pe_strike is not None and ce_strike == pe_strike
+
+
+def normalize_phase(s: dict) -> bool:
+    """Make phase/stop state agree with the actual CE and PE strikes."""
+    old_phase = s.get("phase")
+    old_credit = s.get("straddle_credit")
+    if is_straddle(s):
+        s["phase"] = "STRADDLE"
+        if s.get("straddle_credit") is None:
+            s["straddle_credit"] = round(sum(float(s["legs"][side].get("credit", 0)) for side in ("CE", "PE")), 2)
+    else:
+        s["phase"] = "STRANGLE"
+        s["straddle_credit"] = None
+    return old_phase != s.get("phase") or old_credit != s.get("straddle_credit")
+
+
 def make_cycle(
     expiry_epoch: str, ce: dict, pe: dict, reason: str,
     entry_time: datetime, capture_method: str,
 ) -> dict:
     stamp = entry_time
     initial = round(ce["ltp"] + pe["ltp"], 2)
+    same_strike = strike_for_leg(ce) is not None and strike_for_leg(ce) == strike_for_leg(pe)
     return {
         "cycle_id": f"{stamp:%Y%m%d}-{uuid.uuid4().hex[:8]}",
         "start_date": stamp.date().isoformat(),
@@ -323,14 +367,14 @@ def make_cycle(
         "expiry_epoch": str(expiry_epoch),
         "expiry": next((e["date"] for e in option_chain().get("expiryData", []) if str(e.get("expiry")) == str(expiry_epoch)), ""),
         "status": "ACTIVE",
-        "phase": "STRANGLE",
+        "phase": "STRADDLE" if same_strike else "STRANGLE",
         "legs": {
-            "CE": {"symbol": ce["symbol"], "credit": ce["ltp"], "ltp": ce["ltp"], "high": ce["ltp"], "low": ce["ltp"]},
-            "PE": {"symbol": pe["symbol"], "credit": pe["ltp"], "ltp": pe["ltp"], "high": pe["ltp"], "low": pe["ltp"]},
+            "CE": {"symbol": ce["symbol"], "strike": strike_for_leg(ce), "credit": ce["ltp"], "ltp": ce["ltp"], "high": ce["ltp"], "low": ce["ltp"]},
+            "PE": {"symbol": pe["symbol"], "strike": strike_for_leg(pe), "credit": pe["ltp"], "ltp": pe["ltp"], "high": pe["ltp"], "low": pe["ltp"]},
         },
         "initial_credit": initial,
         "realized_points": 0.0,
-        "straddle_credit": None,
+        "straddle_credit": initial if same_strike else None,
         "adjustment_count": 0,
         "last_event": reason,
         "last_event_time": fmt(stamp),
@@ -527,32 +571,47 @@ def roll_low_leg(s: dict, reason: str):
     high_ltp = float(s["legs"][high_side]["ltp"])
     low_leg = s["legs"][low_side]
     target = round(high_ltp * REPLACEMENT_RATIO, 2)
-    data = option_chain(s["expiry_epoch"])
-    candidates = []
-    for item in data.get("optionsChain", []):
-        if item.get("option_type") != low_side or item.get("symbol") == low_leg["symbol"]:
-            continue
-        try:
-            premium = float(item.get("ltp", item.get("lp")))
-        except (TypeError, ValueError):
-            continue
-        if item.get("symbol") and premium > 0:
-            candidates.append((abs(premium - target), item.get("symbol"), premium))
-    if not candidates:
-        print("Adjustment skipped: no replacement contract found in the same expiry", flush=True)
+    try:
+        data = option_chain(s["expiry_epoch"])
+        candidates = []
+        for item in data.get("optionsChain", []):
+            if item.get("option_type") != low_side or item.get("symbol") == low_leg["symbol"]:
+                continue
+            try:
+                premium = float(item.get("ltp", item.get("lp")))
+                strike = float(item.get("strike_price"))
+            except (TypeError, ValueError):
+                continue
+            if item.get("symbol") and premium > 0:
+                candidates.append((abs(premium - target), item.get("symbol"), premium, strike))
+        if not candidates:
+            last_adjustment_at = now_ist()
+            print("Adjustment skipped: no replacement contract found in the same expiry; monitoring current legs", flush=True)
+            return
+        _, new_symbol, _, new_strike = min(candidates)
+        new_ltp = quote([new_symbol])[new_symbol]
+    except Exception as exc:
+        last_adjustment_at = now_ist()
+        print(
+            f"Adjustment market-data request failed ({type(exc).__name__}); keeping current legs and continuing to monitor; "
+            f"will retry after the cooldown.", flush=True,
+        )
         return
-    _, new_symbol, _ = min(candidates)
-    new_ltp = quote([new_symbol])[new_symbol]
+
     old_symbol = low_leg["symbol"]
+    was_straddle = is_straddle(s)
     close_leg(s, low_side, float(low_leg["ltp"]), reason)
-    s["legs"][low_side] = {"symbol": new_symbol, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
+    s["legs"][low_side] = {"symbol": new_symbol, "strike": new_strike, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
     s["adjustment_count"] = int(s["adjustment_count"]) + 1
-    s["phase"] = "STRADDLE"
+    if is_straddle(s):
+        s["phase"] = "STRADDLE"
+        if not was_straddle:
+            # Start the combined stop only when the actual contracts share a strike.
+            s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
+    else:
+        s["phase"] = "STRANGLE"
+        s["straddle_credit"] = None
     record_position_event(s, "ADJUSTMENT ENTRY", "SELL TO OPEN", low_side, new_symbol, new_ltp, reason)
-    if s.get("straddle_credit") is None:
-        # Stop reference is the premium received for the retained high leg
-        # plus the replacement leg, not the high leg's market value at roll.
-        s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
     subscribe([new_symbol])
     unsubscribe([old_symbol])
     last_adjustment_at = now_ist()
@@ -656,7 +715,7 @@ def process_tick_actions():
         perform_cycle_exit("EXPIRY ROLLOVER", True)
         return
     if len(cycle["legs"]) == 2:
-        if cycle.get("straddle_credit") and sum(float(leg.get("ltp", 0)) for leg in cycle["legs"].values()) >= float(cycle["straddle_credit"]) * (1 + STRADDLE_STOP):
+        if cycle.get("phase") == "STRADDLE" and is_straddle(cycle) and cycle.get("straddle_credit") and sum(float(leg.get("ltp", 0)) for leg in cycle["legs"].values()) >= float(cycle["straddle_credit"]) * (1 + STRADDLE_STOP):
             perform_cycle_exit("10% STRADDLE COMBINED PREMIUM STOP", False)
             return
         _, net_points, net_rupees = p_and_l(cycle)
@@ -675,6 +734,9 @@ def main():
     global cycle, current_spot, entry_attempted_date, pending_entry, next_entry_retry_at
     saved_state = load_latest_state()
     cycle = saved_state if saved_state and saved_state.get("status") == "ACTIVE" else None
+    if cycle and normalize_phase(cycle):
+        log_state(cycle, "RESTORED PHASE FROM ACTUAL CE/PE STRIKES")
+        print(f"Restored cycle phase as {cycle['phase']} from actual contract strikes", flush=True)
     if saved_state and saved_state.get("status") == "CLOSED" and saved_state.get("pending_entry"):
         queued = saved_state["pending_entry"]
         pending_entry = (queued.get("after_expiry"), queued.get("reason", "RESUMED NEXT CYCLE"), False)
