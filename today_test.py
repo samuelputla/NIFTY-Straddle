@@ -593,6 +593,33 @@ def on_open():
     ws_holder["socket"].keep_running()
 
 
+def run_with_timeout(function, timeout_seconds, *args):
+    """Run one API request without letting it block end-of-session finalization."""
+    outcome = {}
+    completed = threading.Event()
+
+    def request():
+        try:
+            outcome["value"] = function(*args)
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            completed.set()
+
+    threading.Thread(
+        target=request,
+        name="bounded-fyers-request",
+        daemon=True,
+    ).start()
+    if not completed.wait(timeout_seconds):
+        raise TimeoutError(
+            f"{function.__name__} did not finish within {timeout_seconds} seconds"
+        )
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 def close_at_end(end_dt):
     while not stop_event.is_set():
         if now_ist() >= end_dt:
@@ -850,27 +877,50 @@ ws_holder["socket"] = ws
 threading.Thread(target=close_at_end, args=(target_end,), daemon=True).start()
 
 print("\nConnecting to FYERS live feed...")
-ws.connect()
 
-# FyersDataSocket.connect() can return after opening the socket. Do not finalize
-# until the separate deadline thread signals the 15:00 (or test-end) stop.
+def connect_websocket():
+    try:
+        ws.connect()
+    except Exception as exc:
+        print("WebSocket connection warning:", exc, flush=True)
+
+
+# Keep SDK connect/read-loop behavior off the main thread so a slow socket
+# shutdown cannot prevent 15:00 finalization from running.
+threading.Thread(
+    target=connect_websocket,
+    name="fyers-websocket-connect",
+    daemon=True,
+).start()
+
 while not stop_event.wait(timeout=0.5):
     pass
 
 # Pull one batched closing quote after the monitor has stopped; if the REST
 # snapshot fails, use the final WebSocket LTP received before the deadline.
 try:
-    closing_snapshot = get_quotes([ce_symbol, pe_symbol])
+    print("Requesting final CE/PE exit quote (8-second limit)...", flush=True)
+    closing_snapshot = run_with_timeout(
+        get_quotes,
+        8,
+        [ce_symbol, pe_symbol],
+    )
     exit_snapshot_received_at = now_ist()
     final_ce_ltp = ltp_from_quote(closing_snapshot[ce_symbol], "final CE")
     final_pe_ltp = ltp_from_quote(closing_snapshot[pe_symbol], "final PE")
     final_ce_time = market_timestamp(closing_snapshot[ce_symbol].get("tt"))
     final_pe_time = market_timestamp(closing_snapshot[pe_symbol].get("tt"))
+    print("Final CE/PE exit quote received.", flush=True)
 except Exception as exc:
-    print("Closing quote warning; using last WebSocket prices:", exc)
+    print(
+        f"Closing quote unavailable ({type(exc).__name__}); "
+        "using last WebSocket prices.",
+        flush=True,
+    )
     exit_snapshot_received_at = now_ist()
-    final_ce_ltp = state["ce_ltp"]
-    final_pe_ltp = state["pe_ltp"]
+    with state_lock:
+        final_ce_ltp = state["ce_ltp"]
+        final_pe_ltp = state["pe_ltp"]
     final_ce_time = exit_snapshot_received_at
     final_pe_time = exit_snapshot_received_at
 
