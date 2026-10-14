@@ -23,7 +23,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  wait-for-session:
+    # A runner started at 08:55 would reach its six-hour cap at 14:55.
+    # Wait in a separate job; the monitoring job starts at/after 09:15.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait until 09:15 IST for scheduled monitoring
+        if: github.event_name == 'schedule'
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, time
+          from zoneinfo import ZoneInfo
+          import time as clock
+          tz = ZoneInfo("Asia/Kolkata")
+          target = datetime.combine(datetime.now(tz).date(), time(9, 15), tzinfo=tz)
+          while datetime.now(tz) < target:
+              clock.sleep(min(10, max(0.1, (target - datetime.now(tz)).total_seconds())))
+          PY
   straddle:
+    needs: wait-for-session
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -50,3 +69,4 @@ jobs:
 
       - name: Run NIFTY straddle
         run: python -u today_test.py
+

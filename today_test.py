@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from request_timing import start_request, await_request, run_with_timeout
 import time as time_module
 
 import gspread
@@ -92,6 +92,7 @@ credentials = Credentials.from_service_account_info(
     scopes=GOOGLE_SCOPES,
 )
 gc = gspread.authorize(credentials)
+gc.set_timeout((3, 8))
 spreadsheet = gc.open_by_key(SPREADSHEET_ID)
 
 
@@ -189,12 +190,25 @@ def fmt_time(value):
     return value.strftime("%H:%M:%S") if value else ""
 
 
+def call_fyers(method, payload):
+    # Isolate concurrent SDK requests and bound even the SDK's internal retries.
+    def request():
+        client = fyersModel.FyersModel(
+            client_id=CLIENT_ID, token=ACCESS_TOKEN,
+            is_async=False, log_path="",
+        )
+        return getattr(client, method)(payload)
+    return run_with_timeout(request, 6)
+
+
 def market_timestamp(value):
     """Convert FYERS quote 'tt' epoch seconds/milliseconds to India time."""
     if value in (None, ""):
         return None
     try:
         epoch = float(value)
+        if epoch <= 0:
+            return None
         if epoch > 10_000_000_000:
             epoch /= 1000
         return datetime.fromtimestamp(epoch, IST)
@@ -204,7 +218,7 @@ def market_timestamp(value):
 
 def get_optionchain_spot_quote():
     """Build an index spot quote from FYERS' option-chain underlying entry."""
-    response = fyers.optionchain({
+    response = call_fyers("optionchain", {
         "symbol": NIFTY_SYMBOL,
         "strikecount": 50,
         "timestamp": "",
@@ -244,7 +258,11 @@ def get_optionchain_spot_quote():
 
 
 def get_quotes(symbols):
-    response = fyers.quotes({"symbols": ",".join(symbols)})
+    # NIFTY's quotes endpoint stalled for 16 minutes on 14 Oct. The
+    # option-chain underlying supplies spot without that failing route.
+    if symbols == [NIFTY_SYMBOL]:
+        return get_optionchain_spot_quote()
+    response = call_fyers("quotes", {"symbols": ",".join(symbols)})
     if response.get("s") != "ok":
         code = response.get("code")
         if len(symbols) > 1 and code in (-99, "-99"):
@@ -282,7 +300,10 @@ def get_quotes(symbols):
 
 def ltp_from_quote(values, label):
     try:
-        return float(values["lp"])
+        price = float(values["lp"])
+        if not 0 < price < float("inf"):
+            raise ValueError("non-positive or non-finite LTP")
+        return price
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"Invalid {label} LTP in quote: {values}") from exc
 
@@ -291,7 +312,7 @@ def ltp_from_quote(values, label):
 def get_previous_day_ohlc(today):
     start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
-    response = fyers.history({
+    response = call_fyers("history", {
         "symbol": NIFTY_SYMBOL,
         "resolution": "D",
         "date_format": "1",
@@ -359,7 +380,7 @@ def make_scenario_row(percent):
         capture_time.strftime("%Y-%m-%d"),
         capture_time.strftime("%H:%M:%S"),
         round(nifty_spot, 2),
-        round(india_vix, 2),
+        round(india_vix, 2) if india_vix is not None else "",
         atm,
         expiry["date"],
         percent,
@@ -446,7 +467,7 @@ def make_daily_row(run_status):
 
     values = [
         capture_time.strftime("%Y-%m-%d"),
-        round(india_vix, 2),
+        round(india_vix, 2) if india_vix is not None else "",
         previous_ohlc["high"],
         previous_ohlc["low"],
         previous_ohlc["close"],
@@ -534,7 +555,10 @@ def handle_sl(leg, ltp):
     sl_values = ce_sl_values if leg_key == "ce" else pe_sl_values
     changed = []
     with state_lock:
+        if stop_event.is_set() or observed_at >= target_end:
+            return
         state[f"{leg_key}_ltp"] = ltp
+        state[f"{leg_key}_last_tick"] = observed_at
         high_key = f"{leg_key}_high"
         low_key = f"{leg_key}_low"
         state[high_key] = max(state[high_key], ltp)
@@ -593,33 +617,6 @@ def on_open():
     ws_holder["socket"].keep_running()
 
 
-def run_with_timeout(function, timeout_seconds, *args):
-    """Run one API request without letting it block end-of-session finalization."""
-    outcome = {}
-    completed = threading.Event()
-
-    def request():
-        try:
-            outcome["value"] = function(*args)
-        except Exception as exc:
-            outcome["error"] = exc
-        finally:
-            completed.set()
-
-    threading.Thread(
-        target=request,
-        name="bounded-fyers-request",
-        daemon=True,
-    ).start()
-    if not completed.wait(timeout_seconds):
-        raise TimeoutError(
-            f"{function.__name__} did not finish within {timeout_seconds} seconds"
-        )
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["value"]
-
-
 def close_at_end(end_dt):
     while not stop_event.is_set():
         if now_ist() >= end_dt:
@@ -648,7 +645,11 @@ print(
     flush=True,
 )
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
-prep_dt = target_dt - timedelta(seconds=20)
+prep_dt = target_dt - timedelta(minutes=5)
+entry_deadline = datetime.combine(today, EXIT_TIME, tzinfo=IST)
+if not TEST_MODE and now_ist() >= entry_deadline:
+    print("Market monitoring window has ended; no new daily entry will be created.")
+    sys.exit(0)
 
 if not TEST_MODE:
     print("Preparing NIFTY/VIX and option contracts before 09:30 IST...")
@@ -658,20 +659,30 @@ else:
     print("TEST MODE: preparing and capturing immediately.")
 
 # Select the ATM strike and expiry using NIFTY spot only; VIX has no strike selection.
-print("Requesting NIFTY spot for ATM selection...", flush=True)
-preselection_snapshot = get_quotes([NIFTY_SYMBOL])
-preselection_nifty_values = preselection_snapshot[NIFTY_SYMBOL]
-preselection_received_at = now_ist()
-preselection_nifty = ltp_from_quote(preselection_nifty_values, "NIFTY")
-atm = nearest_atm(preselection_nifty)
-
-optionchain_response = fyers.optionchain({
-    "symbol": NIFTY_SYMBOL,
-    "strikecount": 50,
-    "timestamp": "",
-})
-if optionchain_response.get("s") != "ok":
-    raise RuntimeError(f"Option chain failed: {optionchain_response}")
+print("Preparing ATM contracts from the option-chain underlying...", flush=True)
+while True:
+    try:
+        optionchain_response = call_fyers("optionchain", {
+            "symbol": NIFTY_SYMBOL, "strikecount": 50, "timestamp": "",
+        })
+        if optionchain_response.get("s") != "ok":
+            raise RuntimeError("Option-chain preparation failed")
+        underlying = next(item for item in optionchain_response["data"]["optionsChain"]
+                          if item.get("strike_price") == -1 or item.get("option_type") in (None, ""))
+        preselection_nifty_values = {
+            "lp": underlying.get("ltp", underlying.get("lp")),
+            "open_price": underlying.get("open_price", 0),
+        }
+        preselection_nifty = ltp_from_quote(preselection_nifty_values, "NIFTY")
+        atm = nearest_atm(preselection_nifty)
+        # Validate before leaving the bounded preparation retry loop.
+        get_atm_options(optionchain_response, atm)
+        break
+    except Exception as exc:
+        print(f"Contract preparation retry: {type(exc).__name__}", flush=True)
+        if TEST_MODE or now_ist() >= entry_deadline:
+            raise
+        time_module.sleep(1)
 
 chain, expiry, ce, pe = get_atm_options(optionchain_response, atm)
 ce_symbol = ce["symbol"]
@@ -683,6 +694,31 @@ put_oi = int(chain.get("putOi", 0) or 0)
 pcr, market_bias = daily_bias(put_oi, call_oi)
 
 if not TEST_MODE:
+    # Refresh the five-minute preparation just before entry, with enough room
+    # for the bounded chain request to finish before 09:30.
+    refresh_dt = target_dt - timedelta(seconds=10)
+    while now_ist() < refresh_dt:
+        time_module.sleep(0.05)
+    try:
+        response = call_fyers("optionchain", {
+            "symbol": NIFTY_SYMBOL, "strikecount": 50, "timestamp": "",
+        })
+        if response.get("s") != "ok":
+            raise RuntimeError("Pre-entry contract refresh failed")
+        spot_item = next(item for item in response["data"]["optionsChain"]
+                         if item.get("strike_price") == -1 or item.get("option_type") in (None, ""))
+        spot_quote = {"lp": spot_item.get("ltp", spot_item.get("lp")),
+                      "open_price": spot_item.get("open_price", 0)}
+        refreshed_atm = nearest_atm(ltp_from_quote(spot_quote, "NIFTY"))
+        refreshed_chain, refreshed_expiry, refreshed_ce, refreshed_pe = get_atm_options(response, refreshed_atm)
+        chain, expiry, ce, pe = refreshed_chain, refreshed_expiry, refreshed_ce, refreshed_pe
+        atm, preselection_nifty_values = refreshed_atm, spot_quote
+        ce_symbol, pe_symbol = ce["symbol"], pe["symbol"]
+        call_oi, put_oi = int(chain.get("callOi", 0) or 0), int(chain.get("putOi", 0) or 0)
+        pcr, market_bias = daily_bias(put_oi, call_oi)
+        oi_retrieved_at = now_ist()
+    except Exception as exc:
+        print(f"Pre-entry refresh unavailable: {type(exc).__name__}; retaining prepared contracts", flush=True)
     print("Waiting for the 09:30 IST entry quote...")
     while now_ist() < target_dt:
         time_module.sleep(0.05)
@@ -700,45 +736,70 @@ def refresh_optionchain_for_oi():
         is_async=False,
         log_path="",
     )
-    return oi_client.optionchain({
+    return run_with_timeout(oi_client.optionchain, 6, {
         "symbol": NIFTY_SYMBOL,
         "strikecount": 50,
         "timestamp": "",
     })
 
 
-with ThreadPoolExecutor(max_workers=4) as pool:
-    nifty_future = pool.submit(get_quotes, [NIFTY_SYMBOL])
-    vix_future = pool.submit(get_quotes, [VIX_SYMBOL])
-    options_future = pool.submit(get_quotes, [ce_symbol, pe_symbol])
-    oi_future = pool.submit(refresh_optionchain_for_oi)
-    entry_snapshot = {}
-    entry_snapshot.update(nifty_future.result())
-    entry_snapshot.update(vix_future.result())
-    entry_snapshot.update(options_future.result())
-    capture_time = now_ist()
+# Capture the first usable CE/PE pair; ancillary metadata cannot delay the
+# recorded premium timestamp or make executor shutdown wait indefinitely.
+vix_pending = start_request(get_quotes, [VIX_SYMBOL])
+oi_pending = start_request(refresh_optionchain_for_oi)
+while True:
     try:
-        refreshed_chain_response = oi_future.result(timeout=10)
-        if refreshed_chain_response.get("s") == "ok":
-            chain = refreshed_chain_response["data"]
-            call_oi = int(chain.get("callOi", 0) or 0)
-            put_oi = int(chain.get("putOi", 0) or 0)
-            pcr, market_bias = daily_bias(put_oi, call_oi)
-            oi_retrieved_at = now_ist()
-            oi_snapshot_status = "CAPTURE-TIME REFRESH" if TEST_MODE else "09:30 REFRESH"
-        else:
-            oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
-            print("OI refresh warning; using pre-entry snapshot")
+        entry_snapshot = get_quotes([ce_symbol, pe_symbol])
+        ltp_from_quote(entry_snapshot[ce_symbol], "CE")
+        ltp_from_quote(entry_snapshot[pe_symbol], "PE")
+        capture_time = now_ist()
+        if not TEST_MODE and capture_time >= entry_deadline:
+            raise RuntimeError("No usable entry pair before the daily close")
+        break
     except Exception as exc:
-        oi_snapshot_status = "PRE-ENTRY FALLBACK: 09:30 refresh failed"
-        print("OI refresh warning; using pre-entry snapshot:", exc)
+        print(f"Entry quote retry: {type(exc).__name__}", flush=True)
+        if TEST_MODE or now_ist() >= entry_deadline:
+            raise
+        time_module.sleep(1)
+
+entry_snapshot[NIFTY_SYMBOL] = preselection_nifty_values
+metadata_deadline = time_module.monotonic() + 3
+try:
+    entry_snapshot.update(await_request(vix_pending, metadata_deadline - time_module.monotonic()))
+except Exception as exc:
+    print(f"VIX unavailable at entry: {type(exc).__name__}; leaving blank", flush=True)
+entry_snapshot.setdefault(VIX_SYMBOL, {})
+try:
+    refreshed_chain_response = await_request(oi_pending, metadata_deadline - time_module.monotonic())
+    if refreshed_chain_response.get("s") == "ok":
+        chain = refreshed_chain_response["data"]
+        spot_item = next((item for item in chain.get("optionsChain", [])
+                         if item.get("strike_price") == -1 or item.get("option_type") in (None, "")), None)
+        if spot_item is not None:
+            spot_quote = {"lp": spot_item.get("ltp", spot_item.get("lp")),
+                          "open_price": spot_item.get("open_price", 0)}
+            ltp_from_quote(spot_quote, "NIFTY")
+            entry_snapshot[NIFTY_SYMBOL] = spot_quote
+        call_oi = int(chain.get("callOi", 0) or 0)
+        put_oi = int(chain.get("putOi", 0) or 0)
+        pcr, market_bias = daily_bias(put_oi, call_oi)
+        oi_retrieved_at = now_ist()
+        oi_snapshot_status = "CAPTURE-TIME REFRESH"
+    else:
+        oi_snapshot_status = "PRE-ENTRY FALLBACK: refresh failed"
+except Exception as exc:
+    oi_snapshot_status = "PRE-ENTRY FALLBACK: refresh unavailable within metadata deadline"
+    print(f"OI metadata fallback: {type(exc).__name__}", flush=True)
 
 nifty_values = entry_snapshot[NIFTY_SYMBOL]
 vix_values = entry_snapshot[VIX_SYMBOL]
 ce_values = entry_snapshot[ce_symbol]
 pe_values = entry_snapshot[pe_symbol]
 nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
-india_vix = ltp_from_quote(vix_values, "India VIX")
+try:
+    india_vix = ltp_from_quote(vix_values, "India VIX")
+except RuntimeError:
+    india_vix = None
 day_open = float(
     nifty_values.get("open_price", 0)
     or preselection_nifty_values.get("open_price", 0)
@@ -763,6 +824,13 @@ entry_data_status = (
 current_atm = nearest_atm(nifty_spot)
 if current_atm != atm:
     entry_data_status = f"ATM SHIFT: selected {atm}, current spot maps to {current_atm}"
+delay = (capture_time - target_dt).total_seconds()
+if not TEST_MODE and delay > 5:
+    entry_data_status += f"; LATE ENTRY +{delay:.1f}s"
+if india_vix is None:
+    entry_data_status += "; VIX UNAVAILABLE"
+if oi_snapshot_status.startswith("PRE-ENTRY"):
+    entry_data_status += "; SPOT/OI PRE-ENTRY FALLBACK"
 
 gap_text = (
     "Unavailable" if day_open == ""
@@ -781,7 +849,7 @@ print(f"Mode                   : {RUN_TYPE}")
 print("Target entry           : 09:30 IST")
 print(f"Entry snapshot received: {capture_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
 print(f"NIFTY                  : {nifty_spot:.2f}")
-print(f"India VIX              : {india_vix:.2f}")
+print(f"India VIX              : {india_vix if india_vix is not None else 'Unavailable'}")
 print(f"ATM / expiry           : {atm} / {expiry['date']}")
 print(f"CE                     : {ce_symbol} @ {ce_entry:.2f}")
 print(f"PE                     : {pe_symbol} @ {pe_entry:.2f}")
@@ -809,6 +877,8 @@ if not TEST_MODE:
 state = {
     "ce_ltp": ce_entry,
     "pe_ltp": pe_entry,
+    "ce_last_tick": capture_time,
+    "pe_last_tick": capture_time,
     "ce_high": ce_entry,
     "ce_low": ce_entry,
     "pe_high": pe_entry,
@@ -921,8 +991,11 @@ except Exception as exc:
     with state_lock:
         final_ce_ltp = state["ce_ltp"]
         final_pe_ltp = state["pe_ltp"]
-    final_ce_time = exit_snapshot_received_at
-    final_pe_time = exit_snapshot_received_at
+        final_ce_time = state["ce_last_tick"]
+        final_pe_time = state["pe_last_tick"]
+    entry_data_status += "; EXIT FROM LAST LIVE TICKS"
+    if any((target_end - stamp).total_seconds() > 10 for stamp in (final_ce_time, final_pe_time)):
+        entry_data_status += "; CHECK EXIT TICK AGE"
 
 state["final_ce_ltp"] = final_ce_ltp
 state["final_pe_ltp"] = final_pe_ltp
@@ -966,4 +1039,5 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
 
