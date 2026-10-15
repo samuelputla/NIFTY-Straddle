@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import threading
-from request_timing import start_request, await_request, run_with_timeout
+from request_timing import start_request, run_with_timeout, collect_ready_requests
 import time as time_module
 
 import gspread
@@ -78,6 +78,7 @@ DAILY_HEADERS = [
     "OI Strike Scope",
     "Entry Data Status",
     "Run Status",
+    "VIX Snapshot Retrieved At (IST)",
 ]
 
 GOOGLE_SCOPES = [
@@ -423,12 +424,13 @@ def append_scenario_rows(rows):
 
 def update_scenario_rows(percentages):
     updates = []
-    for percent in sorted(set(percentages)):
-        row_number = scenario_row_numbers[percent]
-        updates.append({
-            "range": f"A{row_number}:AC{row_number}",
-            "values": [make_scenario_row(percent)],
-        })
+    with state_lock:
+        for percent in sorted(set(percentages)):
+            row_number = scenario_row_numbers[percent]
+            updates.append({
+                "range": f"A{row_number}:AC{row_number}",
+                "values": [make_scenario_row(percent)],
+            })
     if updates:
         scenario_sheet.batch_update(updates, value_input_option="RAW")
 
@@ -509,17 +511,20 @@ def make_daily_row(run_status):
         fmt_time(oi_retrieved_at),
         oi_snapshot_status,
         "FYERS option chain aggregate OI for returned strike range",
-        entry_data_status,
+        entry_data_status + f"; VIX {vix_snapshot_status}",
         run_status,
+        vix_retrieved_at.strftime("%Y-%m-%d %H:%M:%S") if vix_retrieved_at else "",
     ])
     return values
 
 
 def write_daily_row(run_status):
     last_col = column_letter(len(DAILY_HEADERS))
+    with state_lock:
+        values = make_daily_row(run_status)
     daily_sheet.update(
         range_name=f"A{daily_row_number}:{last_col}{daily_row_number}",
-        values=[make_daily_row(run_status)],
+        values=[values],
         value_input_option="RAW",
     )
 
@@ -540,10 +545,9 @@ def create_daily_row_for_today():
 
 
 def update_summary_after_event(percentages):
-    if daily_row_number is None:
-        return
-    update_scenario_rows(percentages)
-    write_daily_row("RUNNING")
+    # Persist on the main thread; the socket must keep processing stop ticks.
+    with state_lock:
+        pending_scenario_updates.update(percentages)
 
 
 def handle_sl(leg, ltp):
@@ -644,6 +648,19 @@ print(
     f"Previous market-day candle loaded for {previous_ohlc['date']}.",
     flush=True,
 )
+daily_row_number = None
+if not TEST_MODE:
+    summary_rows = daily_sheet.get_all_values()
+    today_text = today.strftime("%Y-%m-%d")
+    for row_number, row in enumerate(summary_rows[1:], start=2):
+        if row and row[0] == today_text:
+            raise RuntimeError(
+                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
+                "refusing to duplicate the day's straddle"
+            )
+    daily_row_number = len(summary_rows) + 1
+
+
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
 prep_dt = target_dt - timedelta(minutes=5)
 entry_deadline = datetime.combine(today, EXIT_TIME, tzinfo=IST)
@@ -745,8 +762,16 @@ def refresh_optionchain_for_oi():
 
 # Capture the first usable CE/PE pair; ancillary metadata cannot delay the
 # recorded premium timestamp or make executor shutdown wait indefinitely.
-vix_pending = start_request(get_quotes, [VIX_SYMBOL])
-oi_pending = start_request(refresh_optionchain_for_oi)
+def timestamped_metadata(function, *args):
+    value = function(*args)
+    return value, now_ist()
+
+
+metadata_requests = {
+    "VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL]),
+    "OI": start_request(timestamped_metadata, refresh_optionchain_for_oi),
+}
+metadata_deadline = time_module.monotonic() + 15
 while True:
     try:
         entry_snapshot = get_quotes([ce_symbol, pe_symbol])
@@ -763,43 +788,16 @@ while True:
         time_module.sleep(1)
 
 entry_snapshot[NIFTY_SYMBOL] = preselection_nifty_values
-metadata_deadline = time_module.monotonic() + 3
-try:
-    entry_snapshot.update(await_request(vix_pending, metadata_deadline - time_module.monotonic()))
-except Exception as exc:
-    print(f"VIX unavailable at entry: {type(exc).__name__}; leaving blank", flush=True)
-entry_snapshot.setdefault(VIX_SYMBOL, {})
-try:
-    refreshed_chain_response = await_request(oi_pending, metadata_deadline - time_module.monotonic())
-    if refreshed_chain_response.get("s") == "ok":
-        chain = refreshed_chain_response["data"]
-        spot_item = next((item for item in chain.get("optionsChain", [])
-                         if item.get("strike_price") == -1 or item.get("option_type") in (None, "")), None)
-        if spot_item is not None:
-            spot_quote = {"lp": spot_item.get("ltp", spot_item.get("lp")),
-                          "open_price": spot_item.get("open_price", 0)}
-            ltp_from_quote(spot_quote, "NIFTY")
-            entry_snapshot[NIFTY_SYMBOL] = spot_quote
-        call_oi = int(chain.get("callOi", 0) or 0)
-        put_oi = int(chain.get("putOi", 0) or 0)
-        pcr, market_bias = daily_bias(put_oi, call_oi)
-        oi_retrieved_at = now_ist()
-        oi_snapshot_status = "CAPTURE-TIME REFRESH"
-    else:
-        oi_snapshot_status = "PRE-ENTRY FALLBACK: refresh failed"
-except Exception as exc:
-    oi_snapshot_status = "PRE-ENTRY FALLBACK: refresh unavailable within metadata deadline"
-    print(f"OI metadata fallback: {type(exc).__name__}", flush=True)
+# Supporting data is applied only after monitoring has started.
+india_vix = None
+vix_retrieved_at = None
+vix_snapshot_status = "PENDING"
+oi_snapshot_status = "PRE-ENTRY FALLBACK; ENTRY REFRESH PENDING"
 
 nifty_values = entry_snapshot[NIFTY_SYMBOL]
-vix_values = entry_snapshot[VIX_SYMBOL]
 ce_values = entry_snapshot[ce_symbol]
 pe_values = entry_snapshot[pe_symbol]
 nifty_spot = ltp_from_quote(nifty_values, "NIFTY")
-try:
-    india_vix = ltp_from_quote(vix_values, "India VIX")
-except RuntimeError:
-    india_vix = None
 day_open = float(
     nifty_values.get("open_price", 0)
     or preselection_nifty_values.get("open_price", 0)
@@ -827,10 +825,7 @@ if current_atm != atm:
 delay = (capture_time - target_dt).total_seconds()
 if not TEST_MODE and delay > 5:
     entry_data_status += f"; LATE ENTRY +{delay:.1f}s"
-if india_vix is None:
-    entry_data_status += "; VIX UNAVAILABLE"
-if oi_snapshot_status.startswith("PRE-ENTRY"):
-    entry_data_status += "; SPOT/OI PRE-ENTRY FALLBACK"
+entry_data_status += "; SPOT FROM PRE-ENTRY CONTRACT SNAPSHOT"
 
 gap_text = (
     "Unavailable" if day_open == ""
@@ -862,17 +857,6 @@ print("=================================================")
 # ============================================================
 # CREATE THE DAILY SUMMARY ROW AND THE SEVEN PARALLEL SCENARIOS
 # ============================================================
-daily_row_number = None
-if not TEST_MODE:
-    summary_rows = daily_sheet.get_all_values()
-    today_text = capture_time.date().strftime("%Y-%m-%d")
-    for row_number, row in enumerate(summary_rows[1:], start=2):
-        if row and row[0] == today_text:
-            raise RuntimeError(
-                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
-                "refusing to duplicate the day's straddle"
-            )
-    daily_row_number = len(summary_rows) + 1
 
 state = {
     "ce_ltp": ce_entry,
@@ -910,27 +894,15 @@ for scenario in state["scenarios"].values():
     scenario["ce_trigger_ltp"] = None
     scenario["pe_trigger_ltp"] = None
 
-scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
-scenario_first_row = append_scenario_rows(scenario_rows)
-scenario_row_numbers = {
-    percent: scenario_first_row + index
-    for index, percent in enumerate(SL_PERCENTAGES)
-}
-print(
-    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
-    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
-)
 
-state_lock = threading.Lock()
+state_lock = threading.RLock()
+pending_scenario_updates = set()
 stop_event = threading.Event()
 ws_holder = {"socket": None}
 if not TEST_MODE:
     target_end = datetime.combine(capture_time.date(), EXIT_TIME, tzinfo=IST)
 else:
     target_end = now_ist() + timedelta(minutes=MONITOR_MINUTES)
-
-if daily_row_number is not None:
-    write_daily_row("RUNNING")
 
 ws = data_ws.FyersDataSocket(
     access_token=f"{CLIENT_ID}:{ACCESS_TOKEN}",
@@ -963,8 +935,79 @@ threading.Thread(
     daemon=True,
 ).start()
 
+# The socket now processes ticks while metadata and Sheets work continues.
+with state_lock:
+    scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
+scenario_first_row = append_scenario_rows(scenario_rows)
+scenario_row_numbers = {
+    percent: scenario_first_row + index
+    for index, percent in enumerate(SL_PERCENTAGES)
+}
+print(
+    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
+    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
+)
+
+
+def poll_entry_metadata():
+    global india_vix, vix_retrieved_at, vix_snapshot_status
+    global call_oi, put_oi, pcr, market_bias, oi_retrieved_at, oi_snapshot_status
+    results = collect_ready_requests(
+        metadata_requests, expired=time_module.monotonic() >= metadata_deadline,
+    )
+    for name, (result, error) in results.items():
+        try:
+            if error is not None:
+                raise error
+            value, retrieved_at = result
+            if name == "VIX":
+                india_vix = ltp_from_quote(value[VIX_SYMBOL], "India VIX")
+                vix_retrieved_at = retrieved_at
+                vix_snapshot_status = "ENTRY REFRESH"
+            else:
+                if value.get("s") != "ok":
+                    raise RuntimeError("OI refresh failed")
+                data = value["data"]
+                new_call = int(data["callOi"])
+                new_put = int(data["putOi"])
+                if new_call < 0 or new_put < 0:
+                    raise ValueError("Negative OI")
+                call_oi, put_oi = new_call, new_put
+                pcr, market_bias = daily_bias(put_oi, call_oi)
+                oi_retrieved_at = retrieved_at
+                oi_snapshot_status = "ENTRY REFRESH"
+            print(f"{name} snapshot retrieved at {fmt_time(retrieved_at)} IST", flush=True)
+        except Exception as exc:
+            if name == "VIX":
+                vix_snapshot_status = "UNAVAILABLE"
+            else:
+                oi_snapshot_status = "PRE-ENTRY FALLBACK: entry refresh unavailable"
+            print(f"{name} metadata unavailable: {type(exc).__name__}", flush=True)
+    # Entry premiums, entry timestamp, stop thresholds and fills are never changed here.
+    return bool(results)
+
+
+poll_entry_metadata()
+update_scenario_rows(SL_PERCENTAGES)
+if daily_row_number is not None:
+    write_daily_row("RUNNING")
+
 while not stop_event.wait(timeout=0.5):
-    pass
+    changed_metadata = poll_entry_metadata()
+    with state_lock:
+        changes = set(pending_scenario_updates)
+        pending_scenario_updates.clear()
+    if changed_metadata:
+        changes.update(SL_PERCENTAGES)
+    if changes:
+        try:
+            update_scenario_rows(changes)
+            if daily_row_number is not None:
+                write_daily_row("RUNNING")
+        except Exception as exc:
+            with state_lock:
+                pending_scenario_updates.update(changes)
+            print(f"Sheet update retry queued: {type(exc).__name__}", flush=True)
 
 # Pull one batched closing quote after the monitor has stopped; if the REST
 # snapshot fails, use the final WebSocket LTP received before the deadline.
@@ -1039,5 +1082,6 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
 
 

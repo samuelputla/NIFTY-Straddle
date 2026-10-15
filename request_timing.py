@@ -31,3 +31,21 @@ def await_request(pending, timeout_seconds):
 
 def run_with_timeout(function, timeout_seconds, *args):
     return await_request(start_request(function, *args), timeout_seconds)
+
+
+def collect_ready_requests(pending, expired=False):
+    """Poll optional requests without waiting for unfinished workers."""
+    results = {}
+    for name, request in list(pending.items()):
+        if not request[0].is_set():
+            if expired:
+                results[name] = (None, TimeoutError('Metadata deadline exceeded'))
+                del pending[name]
+            continue
+        try:
+            results[name] = (await_request(request, 0), None)
+        except Exception as exc:
+            results[name] = (None, exc)
+        del pending[name]
+    return results
+
