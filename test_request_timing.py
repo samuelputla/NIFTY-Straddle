@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 import unittest
-from request_timing import await_request, run_with_timeout, start_request
+from request_timing import await_request, run_with_timeout, start_request, collect_ready_requests
 
 
 def load_function(name, env):
@@ -17,6 +17,58 @@ def load_function(name, env):
 
 
 class TimingRegressionTests(unittest.TestCase):
+    def test_pending_metadata_does_not_wait_and_can_expire(self):
+        unfinished = {'VIX': (threading.Event(), {})}
+        started = time.monotonic()
+        self.assertEqual(collect_ready_requests(unfinished), {})
+        self.assertLess(time.monotonic()-started, .1)
+        self.assertIn('VIX', unfinished)
+        expired = collect_ready_requests(unfinished, expired=True)
+        self.assertIsInstance(expired['VIX'][1], TimeoutError)
+        self.assertEqual(unfinished, {})
+
+    def test_stop_triggers_while_metadata_and_sheet_writes_are_pending(self):
+        now=datetime(2026,10,15,9,30,1)
+        scenario={'ce_hit':False}
+        env={'now_ist':lambda:now,'target_end':now+timedelta(hours=5),
+             'stop_event':threading.Event(),'state_lock':threading.RLock(),
+             'ce_sl_values':[110],'pe_sl_values':[110],'SL_PERCENTAGES':[10],
+             'pending_scenario_updates':set(),
+             'state':{'ce_ltp':100,'ce_high':100,'ce_low':100,'scenarios':{10:scenario}}}
+        load_function('update_summary_after_event',env)
+        load_function('handle_sl',env)('CE',115)
+        self.assertTrue(scenario['ce_hit'])
+        self.assertEqual(scenario['ce_exit'],110)
+        self.assertEqual(env['pending_scenario_updates'],{10})
+
+    def test_delayed_metadata_keeps_original_entries_and_actual_retrieval_time(self):
+        retrieved=datetime(2026,10,15,9,30,2)
+        applied=datetime(2026,10,15,9,30,8)
+        done=threading.Event();done.set()
+        env={'collect_ready_requests':collect_ready_requests,'time_module':time,
+             'metadata_deadline':time.monotonic()+15,
+             'metadata_requests':{'VIX':(done,{'value':({'VIX':{'lp':14.9}},retrieved)}),
+                                  'OI':(done,{'value':({'s':'ok','data':{'callOi':100,'putOi':120}},retrieved)})},
+             'VIX_SYMBOL':'VIX','india_vix':None,'vix_retrieved_at':None,
+             'vix_snapshot_status':'PENDING','call_oi':50,'put_oi':50,'pcr':1,
+             'market_bias':'Neutral','oi_retrieved_at':None,'oi_snapshot_status':'PRE-ENTRY',
+             'ce_entry':100,'pe_entry':110,'capture_time':retrieved-timedelta(seconds=2),
+             'ce_sl_values':[110],'pe_sl_values':[121],
+             'now_ist':lambda:applied,'fmt_time':lambda x:x.strftime('%H:%M:%S')}
+        load_function('ltp_from_quote',env);load_function('daily_bias',env)
+        self.assertTrue(load_function('poll_entry_metadata',env)())
+        self.assertEqual(env['vix_retrieved_at'],retrieved)
+        self.assertEqual(env['oi_retrieved_at'],retrieved)
+        self.assertEqual((env['ce_entry'],env['pe_entry']),(100,110))
+        self.assertEqual(env['ce_sl_values'],[110])
+        self.assertEqual(env['pcr'],1.2)
+
+    def test_monitor_start_precedes_initial_sheet_writes(self):
+        source=Path('today_test.py').read_text(encoding='utf-8')
+        launch=source.index('name="fyers-websocket-connect"')
+        self.assertLess(launch,source.index('scenario_first_row = append_scenario_rows'))
+        self.assertNotIn('await_request(',source)
+
     def test_fast_request_returns_and_errors_propagate(self):
         self.assertEqual(run_with_timeout(lambda: 12, 1), 12)
         def fail():
@@ -53,3 +105,4 @@ class TimingRegressionTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
