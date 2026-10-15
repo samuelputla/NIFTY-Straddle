@@ -1,0 +1,14 @@
+name: Run weekly paper monitor
+description: Shared setup for weekly paper monitoring sessions
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install market-data dependencies
+      shell: bash
+      run: python -m pip install fyers-apiv3 gspread google-auth tzdata
+    - name: Monitor weekly paper cycle
+      shell: bash
+      run: python -u weekly_strangle.py

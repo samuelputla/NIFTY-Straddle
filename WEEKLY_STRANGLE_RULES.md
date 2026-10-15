@@ -1,31 +1,124 @@
-# Weekly NIFTY Strangle paper monitor
+# Weekly NIFTY Strangle — agreed paper rules, version 2
 
-## Safety and separation
+## Scope
 
-- This strategy is paper-only. It uses FYERS quotes, option-chain data, and a data WebSocket; it has no order-placement API calls.
-- It writes cycle snapshots and resumable state to `Nifty Weekly Strangle`, with position entries, buybacks, and square-off metadata in `Nifty Weekly Strangle Logs`. The daily short-straddle script writes to `Nifty Daily straddle` and `Nifty Daily Straddle Logs`; its 15:00 exit is unchanged.
-- It uses the same FYERS access-token secret and Google service-account secret. It runs as a second monitor with its own data socket. During Tuesday entry preparation it subscribes to at most 32 near-₹25 candidates, the current weekly legs, and NIFTY spot (at most 35 symbols, below FYERS Standard's 50-symbol socket limit).
+Read-only FYERS market data; simulated positions only. No broker order routes.
+Only `Nifty Weekly Strangle` and `Nifty Weekly Strangle Logs` are written. Daily
+straddle and manual positions are not read, closed, or changed by this strategy.
+“Rule compliance” here means conformance to these agreed paper rules; it is not
+regulatory certification or a claim that this trading strategy is profitable.
 
-## Cycle contract
+## Entry and rollover
 
-1. The workflow is scheduled for 08:55 IST. It connects to the data stream after 09:15 and aims to capture entry prices at/just after 09:30. On Tuesday it prepares a bounded candidate list, uses post-09:30 WebSocket ticks if available, then falls back to live quotes. Transient quote errors are retried without writing a failed-capture row; the actual capture time and method are saved.
-2. Start a new cycle on Tuesday only, choosing the first listed expiry strictly after that Tuesday. Select the CE and PE independently by the closest option-chain premium to ₹25. Use one 65-unit leg each.
-3. Restore active legs or a queued next-cycle entry from the latest `State JSON` cell on each weekday run and continue monitoring them until the selected expiry, a cycle exit, or 15:30 IST.
-4. If either leg premium is at least 50% below the other, buy back only the lower-premium leg and paper-sell a replacement of the same option type, same expiry, and nearest premium to 85% of the higher leg's current premium. Leave the higher-premium leg unchanged.
-5. At/after 15:25 IST, a premium gap of at least 80% invokes that same replacement rule, whether or not the 50% rule was used earlier that day.
-6. On the first replacement, mark the cycle as a straddle and freeze its combined premium reference. If combined active premiums rise 10% above that reference, close both strategy legs and wait until Tuesday to begin the next cycle.
-7. Calculate cycle P&L from every sell credit and buyback premium, including replacement legs. When net premium P&L reaches 80% of the original cycle credit, close both active legs and immediately start a cycle using an expiry strictly after the one just closed.
-8. If the cycle remains active through expiry, close it at the 09:30 Tuesday rollover and begin the next expiry cycle.
+- Track carried premiums from 09:15 IST; initial Tuesday entry aims for 09:30.
+- If 09:30 data is unavailable, use the first eligible later observation and
+  record its actual capture time. Never relabel a late quote as 09:30.
+- Select the next listed NIFTY expiry strictly after the entry date, or strictly
+  after the closed expiry when advancing a cycle. Month-end contracts are usable;
+  a missing weekly flag must not exclude a holiday-adjusted Monday contract.
+- Sell one OTM CE and one OTM PE, each within INR 20–25, closest to INR 25.
+  Retry when no eligible pair is available. Paper quantity remains 65 units.
+- Roll an active cycle at 09:30 on its actual recorded expiry date. When the
+  expiry shifts to Monday, rollover also shifts to Monday. Initial flat-account
+  entry remains Tuesday; the holiday rule applies to carried-cycle rollover.
 
-## Logging and dashboard data contract
+## Adjustments
 
-`Nifty Weekly Strangle` is an append-only cycle snapshot log. It stores cycle identity, snapshot time, expiry, active CE/PE symbols and premiums, high/low premiums, initial credit, realized/open/net premium points, estimated rupee P&L, target, divergence, adjustment count, last event, exit reason, and serialized state used to resume after Actions runs. `Nifty Weekly Strangle Logs` records one row per simulated position open or buyback, including side, symbol, simulated fill premium, quantity, reason, and cycle P&L.
+`divergence = (higher premium - lower premium) / higher premium`.
 
-The sync API accepts only the known spreadsheet ID and the snapshot tabs `Nifty Daily straddle` or `Nifty Weekly Strangle`. It validates each tab's headers and stores independent R2 snapshots. `GET /api/weekly-data` returns the weekly snapshot to the dashboard. The logs tab is retained for spreadsheet study and is not used as the dashboard data source. No broker access token or service-account key is sent to the Site.
+- Before 15:25, trigger when divergence is **at least 50%**.
+- From 15:25 until 15:30, trigger only when divergence is **greater than 80%**.
+- Retain the higher-premium leg. Buy back the lower-premium leg **even if that
+  realizes a loss** (explicitly confirmed by the user).
+- Sell a replacement of the same option type and expiry at **90–95%** of the
+  retained premium; prefer the premium nearest 90%.
+- The replacement strike must move inward toward the retained strike, may equal
+  it, and must never cross it. No eligible replacement means keep the current legs.
+- Requote both existing legs and the candidate in one request immediately before
+  the simulated roll. Recheck divergence, retained side, band and session cutoff.
+- Each adjustment adds INR 150 of estimated costs: INR 75 buyback + INR 75 sale.
 
-## Measurement limits
+## Straddle and cycle exits
 
-- Simulated fills use the selected option-chain/quote LTP. Actual fills can differ.
-- Rupee P&L uses the existing 65-unit project assumption. It includes premium cashflows from rolling legs, but does not estimate brokerage, taxes, or other transaction charges.
-- A 10% straddle-stop exit waits for Tuesday; an 80% profit-target exit starts the next-expiry cycle immediately. The Tuesday-only restart after a stop is the conservative behavior because an immediate restart after a stop was not specified.
+- A straddle exists only when CE and PE strikes are equal. Freeze the **current
+  combined premiums at formation**, not the retained leg's original sell credit.
+- Stop further divergence adjustments. Exit both legs when combined premiums
+  reach 110% of that frozen reference.
+- After a straddle stop, immediately queue the next-expiry cycle and enter on the
+  next eligible data capture during the session. Do not wait until Tuesday.
+- Also exit and advance on INR 2,500 **estimated net** profit across every leg,
+  or the actual-expiry 09:30 rollover. Fresh exit quotes recheck a profit target
+  before executing; stop/expiry exits remain queued through transient failures.
+- If an exit completes at session end or the next entry lacks data, persist the
+  next-expiry request and resume it next session. Never create overlapping cycles.
 
+## Costs and P&L
+
+The user confirmed **INR 75 per execution of one leg**, i.e. INR 150 for a complete
+sell/buyback round trip. `weekly_cost_profile.json` records this all-in assumption.
+No extra tax or slippage rate is layered on top. This is a paper estimate, not a
+broker contract-note calculation. The profile and quantity are frozen per cycle.
+
+`estimated net = (realized premium points + open premium points) * quantity
+                 - costs already incurred - estimated costs to close open legs`
+
+The INR 2,500 target uses this estimated liquidation net. Example: 50 gross
+points * 65 = INR 3,250, less four INR 75 executions = INR 2,950: the INR 2,500 target is met.
+At two INR 25 initial credits, the no-adjustment maximum is also INR 2,950;
+the INR 2,500 net target can therefore be met without adjustments.
+
+Existing historical rows remain unchanged. On first resume, reconstruct paid
+costs from that cycle's ledger, reconcile open positions and realized points,
+then append a migrated snapshot. Missing/inconsistent ledgers stop migration.
+The existing premium-point columns remain **gross premium cashflows**; the rupee
+P&L column on version-2 rows is estimated net. `State JSON` identifies its basis,
+cost profile, paid costs and rule version. Old rows lack that marker and are gross.
+Legacy same-strike positions without a formation-time reference need historical
+reconstruction; the program refuses to invent a new reference from startup prices.
+
+## Data and recovery guarantees
+
+- Positive finite prices only. Socket callbacks cache data; the strategy loop
+  alone mutates positions. A decision uses a copied paired snapshot.
+- Cache observations must be no more than 5 seconds old and no more than 2 seconds
+  apart. Stale pairs use a bounded paired REST refresh, at most once per 15 seconds.
+- Receipt time is recorded explicitly. A fresh API response is not proof that an
+  illiquid contract last traded recently; LTP fills are simulations, not executable
+  bid/ask fills. This remains a market-data limitation.
+- FYERS reads have a 6-second deadline and a maximum of two unfinished workers.
+  Sheets transport uses 3-second connect / 8-second read timeouts.
+- Save complete position state and pending event IDs before flushing the event
+  ledger. Replay missing event rows by stable ID on restart. An uncertain state
+  write halts the worker instead of repeating simulated trades with new IDs.
+- Never resurrect an older active state when the newest state is corrupt/closed.
+- No new entries, adjustments or exits after the session cutoff. Closing state
+  writes may finish shortly afterwards. An exit waiting on data remains queued.
+
+## Runner setup
+
+The default GitHub-hosted workflow schedules at 08:55 IST. The morning job ends
+at 12:30; a dependent afternoon job restores saved state and runs to 15:30.
+Each has a budget below the hosted six-hour limit. There is only one writer.
+The afternoon job requires a successful morning checkpoint; failures require
+inspection rather than silently continuing an uncertain state.
+
+**Hosted scheduling and the job handoff can leave monitoring gaps.** This design
+does not guarantee 09:15 startup, 09:30 capture or uninterrupted intraday coverage.
+The script reports the actual observation times and does not fabricate gap fills.
+
+For a continuous session, register a private Linux self-hosted runner labelled
+`weekly-paper`, keep it online, install Python/Node as required by GitHub Actions,
+and set repository variable `WEEKLY_DEDICATED_RUNNER=true`. The workflow then uses
+one 480-minute session job and disables both hosted jobs. The machine, FYERS login
+and network must remain available. Do not enable the variable without a runner.
+This change prepares that mode; it does not install a runner or enable it remotely.
+
+Manual dispatch defaults to setup-only. Uncheck setup-only to monitor paper positions.
+The end-of-day expiry boundary is taken from FYERS contract metadata. The script
+does not maintain an independent exchange holiday calendar for flat-account entry.
+
+## Verification
+
+Run `python -m unittest -v test_weekly_strangle` for offline state, cost, replacement,
+stop, rollover, cutoff and persistence scenarios. No credentials or live requests
+are used. Passing offline checks does not establish live feed or scheduler readiness.

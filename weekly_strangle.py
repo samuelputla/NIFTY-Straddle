@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
-from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import json
 import os
 import sys
@@ -15,10 +15,11 @@ import threading
 import time as time_module
 import uuid
 
-import gspread
-from fyers_apiv3 import fyersModel
-from fyers_apiv3.FyersWebsocket import data_ws
-from google.oauth2.service_account import Credentials
+from request_timing import run_with_timeout
+from weekly_rules import valid_price, inward_strike, fresh_pair, replacement_valid, execution_cost
+
+# Third-party clients are imported only by initialize(); offline tests never connect.
+gspread = fyersModel = data_ws = Credentials = None
 
 
 CLIENT_ID = "M2DACFCYUO-100"
@@ -40,11 +41,27 @@ ENTRY_RETRY_SECONDS = 15
 REPLACEMENT_RATIO = 0.90
 REPLACEMENT_MAX_RATIO = 0.95
 INITIAL_DIVERGENCE = 0.50
-EOD_DIVERGENCE = 0.80
+EOD_DIVERGENCE = float(os.getenv("WEEKLY_EOD_DIVERGENCE", "0.80"))
+PROFITABLE_ADJUSTMENTS_ONLY = os.getenv("WEEKLY_PROFITABLE_ADJUSTMENTS_ONLY", "false").lower() == "true"
 STRADDLE_STOP = 0.10
-NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "3000"))
+NET_PROFIT_TARGET_RUPEES = float(os.getenv("WEEKLY_NET_PROFIT_TARGET_RUPEES", "2500"))
 CONTRACT_QTY = int(os.getenv("WEEKLY_CONTRACT_QTY", "65"))
 SNAPSHOT_MINUTES = 30
+COST_PROFILE = None
+
+
+def load_cost_profile():
+    path = os.getenv("WEEKLY_COST_PROFILE", "weekly_cost_profile.json")
+    with open(path, encoding="utf-8") as source:
+        profile = json.load(source)
+    import math
+    if not profile.get("id") or "cost_per_execution" not in profile:
+        raise RuntimeError("Weekly paper costs require a named per-execution profile")
+    if not math.isfinite(float(profile["cost_per_execution"])) or float(profile["cost_per_execution"]) < 0:
+        raise RuntimeError("Invalid weekly cost")
+    return profile
+
+
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 HEADERS = [
@@ -74,15 +91,6 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, "%d-%m-%Y").date()
 
 
-if not GOOGLE_JSON:
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set")
-if CONTRACT_QTY <= 0:
-    raise RuntimeError("WEEKLY_CONTRACT_QTY must be a positive unit count")
-
-credentials = Credentials.from_service_account_info(json.loads(GOOGLE_JSON), scopes=GOOGLE_SCOPES)
-sheet = gspread.authorize(credentials).open_by_key(SPREADSHEET_ID)
-
-
 def column_letter(n: int) -> str:
     out = ""
     while n:
@@ -105,7 +113,8 @@ def prepare_sheet(tab_name: str, headers: list[str]):
         rows = ws.get_all_values()
         has_records = any(any(str(c).strip() for c in r) for r in rows[1:])
         previous_headers = list(headers)
-        previous_headers[23] = "80% Target (₹)"
+        if len(previous_headers) > 23:
+            previous_headers[23] = "80% Target (₹)"
         if current == previous_headers:
             # Rename only this known header; keep every existing data row intact.
             ws.update(range_name=f"A1:{column_letter(len(headers))}1", values=[headers], value_input_option="RAW")
@@ -116,19 +125,57 @@ def prepare_sheet(tab_name: str, headers: list[str]):
     return ws
 
 
-sheet_tab = prepare_sheet(SHEET_NAME, HEADERS)
-log_tab = prepare_sheet(LOG_SHEET_NAME, LOG_HEADERS)
-if os.getenv("WEEKLY_SETUP_ONLY", "false").lower() == "true":
-    print(f"Google Sheet tabs ready: {SHEET_NAME}, {LOG_SHEET_NAME}")
-    raise SystemExit(0)
+sheet_tab = log_tab = sheet = None
 
-if not ACCESS_TOKEN:
-    raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
 
-fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, is_async=False, log_path="")
+def initialize():
+    global gspread, fyersModel, data_ws, Credentials, sheet, sheet_tab, log_tab, COST_PROFILE
+    import gspread
+    from fyers_apiv3 import fyersModel
+    from fyers_apiv3.FyersWebsocket import data_ws
+    from google.oauth2.service_account import Credentials
+    if not GOOGLE_JSON:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON secret is not set")
+    if CONTRACT_QTY <= 0:
+        raise RuntimeError("WEEKLY_CONTRACT_QTY must be positive")
+    credentials = Credentials.from_service_account_info(json.loads(GOOGLE_JSON), scopes=GOOGLE_SCOPES)
+    client = gspread.authorize(credentials)
+    client.set_timeout((3, 8))
+    sheet = client.open_by_key(SPREADSHEET_ID)
+    sheet_tab = prepare_sheet(SHEET_NAME, HEADERS)
+    log_tab = prepare_sheet(LOG_SHEET_NAME, LOG_HEADERS)
+    if os.getenv("WEEKLY_SETUP_ONLY", "false").lower() == "true":
+        print("Weekly paper tabs verified; no market-data calls made", flush=True)
+        return False
+    COST_PROFILE = load_cost_profile()
+    if not ACCESS_TOKEN:
+        raise RuntimeError("FYERS_ACCESS_TOKEN secret is not set")
+    return True
+
+
+market_slots = threading.BoundedSemaphore(2)
+
+
+def market_call(method, payload):
+    # Isolate SDK clients between calls; a hung read must not stall the session.
+    if not market_slots.acquire(blocking=False):
+        raise MarketDataError("Previous FYERS requests still pending; retry later")
+    def request():
+        try:
+            client = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN, is_async=False, log_path="")
+            return getattr(client, method)(payload)
+        finally:
+            market_slots.release()
+    try:
+        return run_with_timeout(request, 6)
+    except Exception as exc:
+        raise MarketDataError("FYERS request failed or exceeded six seconds") from exc
+
+
 state_lock = threading.RLock()
 latest: dict[str, float] = {}
 latest_at: dict[str, datetime] = {}
+observed_ranges: dict[str, tuple[float, float]] = {}
 socket_holder: dict[str, object] = {"socket": None}
 subscribed: set[str] = set()
 stop_event = threading.Event()
@@ -142,21 +189,84 @@ prepared_expiry_date: str | None = None
 prepared_candidates: dict[str, list[dict]] = {"CE": [], "PE": []}
 pending_entry: tuple[str | None, str, bool] | None = None
 next_entry_retry_at: datetime | None = None
+next_action_retry_at: datetime | None = None
+
+
+class MarketDataError(RuntimeError):
+    pass
+
+
+class PersistenceError(RuntimeError):
+    pass
+
+
+def in_session():
+    stamp = now_ist()
+    return stamp.weekday() < 5 and MARKET_OPEN <= stamp.time() < END_TIME and not stop_event.is_set()
+
+
+def apply_prices(s, values, stamp):
+    for leg in s["legs"].values():
+        if leg.get("is_open", True):
+            price = values[leg["symbol"]]
+            leg["ltp"] = price
+            leg["high"] = max(float(leg.get("high", price)), price)
+            leg["low"] = min(float(leg.get("low", price)), price)
+            leg["quote_received_at"] = fmt(stamp)
+            leg["quote_time_basis"] = "local receipt time; exchange trade freshness not guaranteed"
+
+
+last_refresh_at = None
+last_notice = {}
+
+
+def notice(key, message):
+    stamp = now_ist()
+    if key not in last_notice or (stamp-last_notice[key]).total_seconds() >= 60:
+        print(message, flush=True)
+        last_notice[key] = stamp
+
+
+def refresh_active(s):
+    global last_refresh_at
+    symbols = [leg["symbol"] for leg in s["legs"].values() if leg.get("is_open", True)]
+    stamp = now_ist()
+    with state_lock:
+        if fresh_pair(symbols, latest, latest_at, stamp):
+            apply_prices(s, {symbol: latest[symbol] for symbol in symbols}, stamp)
+            for leg in s['legs'].values():
+                if leg['symbol'] in observed_ranges:
+                    high, low = observed_ranges[leg['symbol']]
+                    leg['high'] = max(leg['high'], high)
+                    leg['low'] = min(leg['low'], low)
+            return True
+    if last_refresh_at and (stamp-last_refresh_at).total_seconds() < 15:
+        return False
+    last_refresh_at = stamp
+    try:
+        values = quote(symbols)
+    except Exception as exc:
+        notice("stale", f"No fresh paired premiums; actions paused ({type(exc).__name__})")
+        return False
+    if not in_session():
+        return False
+    apply_prices(s, values, now_ist())
+    return True
 
 
 def option_chain(timestamp: str = "") -> dict:
-    response = fyers.optionchain({"symbol": UNDERLYING, "strikecount": 50, "timestamp": timestamp})
+    response = market_call("optionchain", {"symbol": UNDERLYING, "strikecount": 50, "timestamp": timestamp})
     if response.get("s") != "ok":
-        raise RuntimeError(f"FYERS option-chain request failed: {response.get('code')} {response.get('message', '')}")
+        raise MarketDataError(f"FYERS option-chain request failed: {response.get('code')} {response.get('message', '')}")
     return response["data"]
 
 
-def quote(symbols: list[str]) -> dict[str, float]:
+def quote(symbols: list[str], require_all=True) -> dict[str, float]:
     if not symbols:
         return {}
-    response = fyers.quotes({"symbols": ",".join(dict.fromkeys(symbols))})
+    response = market_call("quotes", {"symbols": ",".join(dict.fromkeys(symbols))})
     if response.get("s") != "ok":
-        raise RuntimeError(f"FYERS quote request failed: {response.get('code')} {response.get('message', '')}")
+        raise MarketDataError(f"FYERS quote request failed: {response.get('code')} {response.get('message', '')}")
     found = {}
     for item in response.get("d", []):
         value = item.get("v", {})
@@ -165,11 +275,11 @@ def quote(symbols: list[str]) -> dict[str, float]:
             ltp = float(value.get("lp"))
         except (TypeError, ValueError):
             continue
-        if symbol and ltp > 0:
+        if symbol and valid_price(ltp):
             found[symbol] = ltp
     missing = [s for s in symbols if s not in found]
-    if missing:
-        raise RuntimeError(f"FYERS returned no usable LTP for {missing}")
+    if missing and require_all:
+        raise MarketDataError(f"FYERS returned no usable LTP for {missing}")
     return found
 
 
@@ -177,18 +287,11 @@ def expiry_options(data: dict, expiry_epoch: str | None = None, *, after_date: d
     expiries = data.get("expiryData", [])
     today = now_ist().date()
     viable = []
-    flags_available = any(entry.get("expiry_flag") for entry in expiries)
     for entry in expiries:
         try:
             exp_date = parse_date(entry["date"])
             epoch = str(entry["expiry"])
         except (KeyError, ValueError, TypeError):
-            continue
-        expiry_flag = str(entry.get("expiry_flag", "")).upper()
-        if flags_available and expiry_flag != "W":
-            continue
-        if not flags_available and exp_date.weekday() != 1:
-            # Fail safely when the API omits contract type information.
             continue
         date_floor = after_date if after_date is not None else today - timedelta(days=1)
         if exp_date > date_floor and (expiry_epoch is None or int(epoch) > int(expiry_epoch)):
@@ -223,7 +326,9 @@ def is_otm(side: str, strike: float, spot: float) -> bool:
 def choose_entry_candidate(candidates: list[dict]) -> dict:
     """Prefer ₹20-₹25 contracts, then choose the available premium nearest ₹25."""
     in_band = [c for c in candidates if 20.0 <= float(c["ltp"]) <= TARGET_PREMIUM]
-    return min(in_band or candidates, key=lambda c: abs(float(c["ltp"]) - TARGET_PREMIUM))
+    if not in_band:
+        raise RuntimeError("No eligible OTM contract inside the INR 20-25 entry band")
+    return min(in_band, key=lambda c: abs(float(c["ltp"]) - TARGET_PREMIUM))
 
 
 def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str, dict]:
@@ -245,16 +350,16 @@ def target_contracts(expiry_epoch: str, premiums: dict[str, float]) -> dict[str,
                 strike = float(item.get("strike_price"))
             except (TypeError, ValueError):
                 continue
-            if symbol and ltp > 0 and is_otm(side, strike, spot):
+            if symbol and valid_price(ltp) and is_otm(side, strike, spot):
                 candidates.append({"symbol": symbol, "ltp": ltp, "strike": strike, "side": side})
         if not candidates:
             raise RuntimeError(f"No OTM {side} contracts in the selected expiry chain")
         chosen[side] = choose_entry_candidate(candidates)
-    refreshed = quote([chosen["CE"]["symbol"], chosen["PE"]["symbol"]])
+    refreshed = quote([chosen["CE"]["symbol"], chosen["PE"]["symbol"], UNDERLYING])
     for side in ("CE", "PE"):
         chosen[side]["ltp"] = refreshed[chosen[side]["symbol"]]
-        if chosen[side]["ltp"] <= 0:
-            raise RuntimeError(f"Selected {side} quote is invalid")
+        if not (20 <= chosen[side]["ltp"] <= 25 and is_otm(side, chosen[side]["strike"], refreshed[UNDERLYING])):
+            raise RuntimeError(f"Selected {side} no longer satisfies entry band or OTM rule")
     return chosen
 
 
@@ -275,7 +380,7 @@ def candidate_contracts(expiry_epoch: str) -> dict[str, list[dict]]:
             strike = float(item.get("strike_price"))
         except (TypeError, ValueError):
             continue
-        if symbol and premium > 0 and is_otm(side, strike, spot):
+        if symbol and valid_price(premium) and is_otm(side, strike, spot):
             by_side[side].append({"symbol": symbol, "ltp": premium, "strike": strike, "side": side})
     for side in by_side:
         by_side[side] = sorted(
@@ -324,26 +429,31 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
     # If the runner starts late, never select a pre-09:30 tick as the entry.
     deadline = max(now_ist(), target_dt) + timedelta(seconds=ENTRY_TICK_WAIT_SECONDS)
     while now_ist() < deadline:
+        with state_lock:
+            prices, stamps = dict(latest), dict(latest_at)
         chosen = {}
         for side in ("CE", "PE"):
             fresh = [
-                {**item, "ltp": latest[item["symbol"]]}
+                {**item, "ltp": prices[item["symbol"]]}
                 for item in pool[side]
-                if item["symbol"] in latest_at
-                and latest_at[item["symbol"]] >= target_dt
-                and item["symbol"] in latest
-                and latest[item["symbol"]] > 0
+                if item["symbol"] in stamps
+                and stamps[item["symbol"]] >= target_dt
+                and (now_ist()-stamps[item["symbol"]]).total_seconds() <= 5
+                and 20 <= prices.get(item["symbol"], 0) <= 25
+                and item["symbol"] in prices
+                and valid_price(prices[item["symbol"]])
                 and is_otm(side, float(item["strike"]), entry_spot)
             ]
             if fresh:
                 chosen[side] = choose_entry_candidate(fresh)
-        if len(chosen) == 2:
-            captured_at = max(latest_at[chosen[side]["symbol"]] for side in ("CE", "PE"))
+        if len(chosen) == 2 and fresh_pair([chosen[side]["symbol"] for side in ("CE", "PE")], prices, stamps, now_ist()):
+            captured_at = max(stamps[chosen[side]["symbol"]] for side in ("CE", "PE"))
             return chosen, captured_at, "post-09:30 WebSocket tick"
         time_module.sleep(0.05)
 
     symbols = [item["symbol"] for side in ("CE", "PE") for item in pool[side]]
-    values = quote(symbols)
+    values = quote(symbols + [UNDERLYING], require_all=False)
+    entry_spot = values[UNDERLYING]
     chosen = {}
     for side in ("CE", "PE"):
         candidates = [
@@ -360,26 +470,14 @@ def capture_prepared_contracts(expiry_epoch: str) -> tuple[dict[str, dict], date
 
 
 def strike_for_leg(leg: dict) -> float | None:
-    """Return strike metadata, falling back to the strike suffix in a FYERS symbol."""
+    """Use explicit contract metadata; never include expiry digits in the strike."""
     try:
         value = leg.get("strike")
         if value is not None and str(value).strip():
-            return float(value)
+            return float(value) if valid_price(value) else None
     except (TypeError, ValueError):
         pass
-    symbol = str(leg.get("symbol", ""))
-    suffix = symbol[-2:]
-    if suffix not in ("CE", "PE"):
-        return None
-    digits = ""
-    for char in reversed(symbol[:-2]):
-        if not char.isdigit():
-            break
-        digits = char + digits
-    try:
-        return float(digits) if digits else None
-    except ValueError:
-        return None
+    return None  # Missing strike metadata must be repaired from the chain, not guessed.
 
 
 def is_straddle(s: dict) -> bool:
@@ -395,7 +493,7 @@ def normalize_phase(s: dict) -> bool:
     if is_straddle(s):
         s["phase"] = "STRADDLE"
         if s.get("straddle_credit") is None:
-            s["straddle_credit"] = round(sum(float(s["legs"][side].get("credit", 0)) for side in ("CE", "PE")), 2)
+            s["straddle_credit"] = round(sum(float(s["legs"][side]["ltp"]) for side in ("CE", "PE")), 2)
     else:
         s["phase"] = "STRANGLE"
         s["straddle_credit"] = None
@@ -423,6 +521,12 @@ def make_cycle(
             "PE": {"symbol": pe["symbol"], "strike": strike_for_leg(pe), "credit": pe["ltp"], "ltp": pe["ltp"], "high": pe["ltp"], "low": pe["ltp"]},
         },
         "initial_credit": initial,
+        "quantity": CONTRACT_QTY,
+        "cost_profile": deepcopy(COST_PROFILE),
+        "estimated_paid_costs": 0.0,
+        "pnl_basis": "estimated net after paid and reserved exit costs",
+        "rules_version": "weekly-v2",
+        "straddle_reference_basis": "paired premiums at formation" if same_strike else None,
         "realized_points": 0.0,
         "straddle_credit": initial if same_strike else None,
         "adjustment_count": 0,
@@ -445,10 +549,47 @@ def load_latest_state() -> dict | None:
             continue
         try:
             saved = json.loads(row[state_i])
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Newest weekly state is invalid; refusing to restore an older position") from exc
         return saved
     return None
+
+
+def migrate_costs(s):
+    if s.get("cost_profile"):
+        if s.get("quantity", CONTRACT_QTY) != CONTRACT_QTY:
+            raise RuntimeError("Configured quantity differs from the carried cycle")
+        return False
+    rows = log_tab.get_all_values()
+    events = [r for r in rows[1:] if len(r) >= 11 and r[1] == s["cycle_id"]]
+    if not events:
+        raise RuntimeError("Cannot estimate existing cycle costs without its complete trade ledger")
+    open_legs, realized, total, seen = {}, 0.0, 0.0, set()
+    for r in events:
+        if r[0] in seen:
+            continue
+        seen.add(r[0])
+        action, symbol, premium, qty = r[4], r[6], float(r[9]), int(r[10])
+        if qty != CONTRACT_QTY:
+            raise RuntimeError("Historical quantity mismatch")
+        if action == "SELL TO OPEN":
+            if symbol in open_legs:
+                raise RuntimeError("Duplicate unmatched entry in legacy ledger")
+            open_legs[symbol] = premium
+        elif action == "BUY TO CLOSE":
+            if symbol not in open_legs:
+                raise RuntimeError("Missing entry in legacy ledger")
+            realized += open_legs.pop(symbol)-premium
+        else:
+            raise RuntimeError("Unknown legacy position action")
+        total += execution_cost(action, premium, qty, COST_PROFILE)
+    expected = {l["symbol"]: float(l["credit"]) for l in s["legs"].values() if l.get("is_open", True)}
+    if open_legs != expected or abs(realized-s["realized_points"]) > .001:
+        raise RuntimeError("Legacy ledger does not reconcile; refusing to invent costs")
+    s.update(cost_profile=deepcopy(COST_PROFILE), estimated_paid_costs=round(total, 4),
+             quantity=CONTRACT_QTY, pnl_basis="estimated net after paid and reserved exit costs",
+             rules_version="weekly-v2", cost_migration_time=fmt(now_ist()))
+    return True
 
 
 def load_state() -> dict | None:
@@ -465,7 +606,16 @@ def p_and_l(s: dict) -> tuple[float, float, float]:
         if leg.get("is_open", True)
     )
     net_points = float(s["realized_points"]) + open_points
-    return round(open_points, 2), round(net_points, 2), round(net_points * CONTRACT_QTY, 2)
+    # Premium points remain gross for historical schema compatibility.
+    # The rupee value is estimated net, including the cost of closing open legs.
+    profile = s.get("cost_profile")
+    if not profile:
+        raise RuntimeError("Unmigrated weekly state has no cost profile")
+    qty = s.get("quantity", CONTRACT_QTY)
+    exit_costs = sum(execution_cost("BUY TO CLOSE", leg["ltp"], qty, profile)
+                     for leg in s["legs"].values() if leg.get("is_open", True))
+    net_rupees = net_points*qty - s.get("estimated_paid_costs", 0) - exit_costs
+    return round(open_points, 2), round(net_points, 2), round(net_rupees, 2)
 
 
 def divergence(s: dict) -> float:
@@ -491,27 +641,48 @@ def snapshot_row(s: dict, event: str = "") -> list:
     ]
 
 
-def record_position_event(
-    s: dict, event_type: str, action: str, side: str, symbol: str,
-    premium: float, reason: str, event_time: str | None = None,
-):
+def record_position_event(s, event_type, action, side, symbol, premium, reason, event_time=None):
+    cost = execution_cost(action, premium, s.get("quantity", CONTRACT_QTY), s["cost_profile"])
+    s["estimated_paid_costs"] = round(s.get("estimated_paid_costs", 0) + cost, 4)
     _, _, net_rupees = p_and_l(s)
-    log_tab.append_row([
+    s.setdefault("pending_events", []).append([
         uuid.uuid4().hex, s.get("cycle_id", ""), event_time or fmt(now_ist()), event_type, action, side,
         symbol, s.get("expiry", ""), s.get("phase", ""), round(float(premium), 2),
-        CONTRACT_QTY, reason, round(float(s.get("realized_points", 0.0)) * CONTRACT_QTY, 2),
+        CONTRACT_QTY, reason, round(float(s.get("realized_points", 0))*CONTRACT_QTY, 2),
         net_rupees, s.get("status", ""),
-    ], value_input_option="RAW")
+    ])
 
 
-def log_state(s: dict, event: str = ""):
+def flush_events(s):
+    pending = s.get("pending_events", [])
+    if not pending:
+        return
+    known = {row[0] for row in log_tab.get_all_values()[1:] if row}
+    for row in pending:
+        if row[0] not in known:
+            log_tab.append_row(row, value_input_option="RAW")
+            known.add(row[0])
+    s["pending_events"] = []
+
+
+def log_state(s, event=""):
     global last_write_at
-    with state_lock:
-        if event:
-            s["last_event"] = event
-            s["last_event_time"] = fmt(now_ist())
-        sheet_tab.append_row(snapshot_row(s, event), value_input_option="RAW")
-        last_write_at = now_ist()
+    if event:
+        s["last_event"] = event
+        s["last_event_time"] = fmt(now_ist())
+    # Commit the complete resulting position and pending event IDs together.
+    # On an ambiguous write failure, halt: never retry an adjustment with fresh IDs.
+    try:
+        sheet_tab.append_row(snapshot_row(deepcopy(s)), value_input_option="RAW")
+    except Exception as exc:
+        raise PersistenceError("Weekly state write uncertain; halting to prevent duplicate simulated trades") from exc
+    last_write_at = now_ist()
+    try:
+        flush_events(s)
+    except Exception as exc:
+        notice("event-log", f"Events committed in state; event-log retry pending ({type(exc).__name__})")
+
+
 
 
 def subscribe(symbols: list[str]):
@@ -520,8 +691,11 @@ def subscribe(symbols: list[str]):
         return
     add = [sym for sym in symbols if sym and sym not in subscribed]
     if add:
-        sock.subscribe(symbols=add, data_type="SymbolUpdate")
-        subscribed.update(add)
+        try:
+            sock.subscribe(symbols=add, data_type="SymbolUpdate")
+            subscribed.update(add)
+        except Exception as exc:
+            notice("subscribe", f"Subscription deferred; paired REST fallback available ({type(exc).__name__})")
 
 
 def unsubscribe(symbols: list[str]):
@@ -543,7 +717,6 @@ def close_leg(s: dict, side: str, ltp: float, event: str):
     leg["closed_time"] = fmt(now_ist())
     leg["is_open"] = False
     record_position_event(s, "POSITION EXIT", "BUY TO CLOSE", side, old_symbol, ltp, event)
-    unsubscribe([old_symbol])
     return old_symbol
 
 
@@ -556,6 +729,11 @@ def close_cycle(s: dict, reason: str):
         log_state(s, reason)
         return
     values = quote(symbols)
+    if not in_session():
+        raise MarketDataError("Session ended before exit prices arrived; exit remains queued")
+    apply_prices(s, values, now_ist())
+    if reason == "₹2,500 NET CYCLE PROFIT TARGET" and p_and_l(s)[2] < NET_PROFIT_TARGET_RUPEES:
+        return False
     for side, leg in list(s["legs"].items()):
         if not leg.get("is_open", True):
             continue
@@ -565,7 +743,10 @@ def close_cycle(s: dict, reason: str):
     s["status"] = "CLOSED"
     s["exit_reason"] = reason
     s["phase"] = "CLOSED"
+    s.pop("pending_exit", None)
     log_state(s, reason)
+    unsubscribe(symbols)
+    return True
 
 
 def expiry_after(epoch: str) -> str:
@@ -591,7 +772,14 @@ def start_cycle(after_epoch: str | None, event: str, use_prepared: bool = False)
         expiry_label = next((entry["date"] for entry in data.get("expiryData", []) if str(entry.get("expiry")) == str(epoch)), "")
         contracts = target_contracts(epoch, {"CE": TARGET_PREMIUM, "PE": TARGET_PREMIUM})
         captured_at, capture_method = now_ist(), "FYERS quote snapshot"
+    if not in_session() or (after_epoch is None and now_ist().time() < START_TIME):
+        raise RuntimeError("Entry capture completed outside the permitted session")
+    if parse_date(expiry_label) <= now_ist().date():
+        raise RuntimeError("New cycle requires an unexpired future expiry")
     s = make_cycle(epoch, expiry_label, contracts["CE"], contracts["PE"], event, captured_at, capture_method)
+    with state_lock:
+        for leg in s['legs'].values():
+            observed_ranges[leg['symbol']] = (leg['ltp'], leg['ltp'])
     for side in ("CE", "PE"):
         leg = s["legs"][side]
         record_position_event(
@@ -607,7 +795,10 @@ def start_cycle(after_epoch: str | None, event: str, use_prepared: bool = False)
         if item["symbol"] not in selected
     ]
     unsubscribe(unused)
-    log_state(s, event)
+    try:
+        log_state(s, event)
+    except Exception as exc:
+        raise PersistenceError("Entry state write failed; inspect state before resuming") from exc
     print(
         f"Paper cycle {s['cycle_id']} started: expiry {s['expiry']}, "
         f"CE {contracts['CE']['symbol']} @{contracts['CE']['ltp']:.2f}, "
@@ -641,15 +832,30 @@ def roll_low_leg(s: dict, reason: str):
                 strike = float(item.get("strike_price"))
             except (TypeError, ValueError):
                 continue
-            if item.get("symbol") and premium > 0:
+            if (item.get("symbol") and valid_price(premium)
+                    and inward_strike(low_side, strike_for_leg(low_leg), strike, strike_for_leg(s["legs"][high_side]))):
                 candidates.append((abs(premium - target), item.get("symbol"), premium, strike))
         eligible = [candidate for candidate in candidates if minimum_premium <= candidate[2] <= maximum_premium]
         if not eligible:
             last_adjustment_at = now_ist()
-            print("Adjustment skipped: no same-expiry replacement is within 90%-95% of the retained leg; monitoring current legs", flush=True)
+            notice("no-replacement", "Adjustment skipped: no inward replacement within 90%-95%; keeping current legs")
             return
         _, new_symbol, _, new_strike = min(eligible, key=lambda candidate: abs(candidate[2] - target))
-        new_ltp = quote([new_symbol])[new_symbol]
+        values = quote([low_leg["symbol"], s["legs"][high_side]["symbol"], new_symbol])
+        new_ltp = values[new_symbol]
+        low_price = values[low_leg["symbol"]]
+        high_price = values[s["legs"][high_side]["symbol"]]
+        threshold = EOD_DIVERGENCE if now_ist().time() >= ADJUST_TIME else INITIAL_DIVERGENCE
+        if (now_ist().time() >= ADJUST_TIME and (high_price-low_price)/high_price <= EOD_DIVERGENCE):
+            last_adjustment_at = now_ist()
+            return
+        if not in_session() or not replacement_valid(
+            low_side, low_leg, s["legs"][high_side], new_strike, new_ltp,
+            low_price, high_price, threshold, PROFITABLE_ADJUSTMENTS_ONLY,
+        ):
+            last_adjustment_at = now_ist()
+            notice("replacement", "Adjustment skipped: fresh quotes no longer satisfy the replacement rules")
+            return
     except Exception as exc:
         last_adjustment_at = now_ist()
         print(
@@ -660,22 +866,27 @@ def roll_low_leg(s: dict, reason: str):
 
     old_symbol = low_leg["symbol"]
     was_straddle = is_straddle(s)
-    close_leg(s, low_side, float(low_leg["ltp"]), reason)
+    apply_prices(s, values, now_ist())
+    close_leg(s, low_side, low_price, reason)
     s["legs"][low_side] = {"symbol": new_symbol, "strike": new_strike, "credit": new_ltp, "ltp": new_ltp, "high": new_ltp, "low": new_ltp}
+    with state_lock:
+        observed_ranges[new_symbol] = (new_ltp, new_ltp)
     s["adjustment_count"] = int(s["adjustment_count"]) + 1
     if is_straddle(s):
         s["phase"] = "STRADDLE"
         if not was_straddle:
             # Start the combined stop only when the actual contracts share a strike.
-            s["straddle_credit"] = round(float(s["legs"][high_side]["credit"]) + new_ltp, 2)
+            s["straddle_credit"] = round(high_price + new_ltp, 2)
+            s["straddle_reference_time"] = fmt(now_ist())
+            s["straddle_reference_basis"] = "paired premiums at formation"
     else:
         s["phase"] = "STRANGLE"
         s["straddle_credit"] = None
     record_position_event(s, "ADJUSTMENT ENTRY", "SELL TO OPEN", low_side, new_symbol, new_ltp, reason)
-    subscribe([new_symbol])
-    unsubscribe([old_symbol])
     last_adjustment_at = now_ist()
     log_state(s, f"{reason}: closed {low_side}; sold replacement {new_symbol} at 90%-95% of {high_side}")
+    subscribe([new_symbol])
+    unsubscribe([old_symbol])
     print(f"Paper adjustment: {old_symbol} bought back @{low_leg['ltp']:.2f}; {new_symbol} sold @{new_ltp:.2f}; held {high_side} unchanged", flush=True)
 
 
@@ -686,7 +897,7 @@ def should_roll(s: dict, observed_time: datetime) -> bool:
     # At 15:25 use only the stronger end-of-day threshold. Earlier in the
     # session, the ordinary 50% divergence rule applies.
     threshold = EOD_DIVERGENCE if observed_time.time() >= ADJUST_TIME else INITIAL_DIVERGENCE
-    return ratio >= threshold
+    return ratio > threshold if observed_time.time() >= ADJUST_TIME else ratio >= threshold
 
 
 def on_message(message):
@@ -696,23 +907,24 @@ def on_message(message):
         ltp = float(message.get("ltp"))
     except (TypeError, ValueError):
         return
+    if not valid_price(ltp):
+        return
     with state_lock:
         if symbol == UNDERLYING:
             current_spot = round(ltp, 2)
         latest[symbol] = ltp
         latest_at[symbol] = now_ist()
-        if cycle:
-            for leg in cycle.get("legs", {}).values():
-                if leg.get("symbol") == symbol:
-                    leg["ltp"] = ltp
-                    leg["high"] = max(float(leg.get("high", ltp)), ltp)
-                    leg["low"] = min(float(leg.get("low", ltp)), ltp)
+        high, low = observed_ranges.get(symbol, (ltp, ltp))
+        observed_ranges[symbol] = (max(high, ltp), min(low, ltp))
 
 
 def on_open():
     print("Weekly paper WebSocket connected", flush=True)
     # A reconnect creates a fresh subscription session.
     subscribed.clear()
+    with state_lock:
+        latest.clear()
+        latest_at.clear()
     if cycle:
         subscribe([leg["symbol"] for leg in cycle["legs"].values() if leg.get("is_open", True)])
     subscribe([item["symbol"] for side in ("CE", "PE") for item in prepared_candidates[side]])
@@ -747,12 +959,19 @@ def perform_cycle_exit(reason: str, start_next: bool):
     global cycle, entry_attempted_date, pending_entry, next_entry_retry_at
     if not cycle or cycle["status"] != "ACTIVE":
         return
+    if cycle.get("pending_exit") != reason:
+        cycle["pending_exit"] = reason
+        log_state(cycle, "EXIT REQUESTED: " + reason)
     previous_expiry = cycle["expiry_epoch"]
     cycle["pending_entry"] = (
         {"after_expiry": previous_expiry, "reason": f"NEW CYCLE AFTER {reason}"}
         if start_next else None
     )
-    close_cycle(cycle, reason)
+    if close_cycle(cycle, reason) is False:
+        cycle.pop("pending_entry", None)
+        cycle.pop("pending_exit", None)
+        log_state(cycle, "TARGET DEFERRED: fresh paired exit prices below net target")
+        return
     if not start_next and now_ist().weekday() == 1:
         entry_attempted_date = now_ist().date()
     if start_next and now_ist().time() < END_TIME:
@@ -768,21 +987,28 @@ def perform_cycle_exit(reason: str, start_next: bool):
 
 def process_tick_actions():
     global cycle, last_write_at
-    if not cycle or cycle.get("status") != "ACTIVE":
+    if not cycle or cycle.get("status") != "ACTIVE" or not in_session():
+        return
+    if next_action_retry_at and now_ist() < next_action_retry_at:
+        return
+    if not refresh_active(cycle):
         return
     stamp = now_ist()
+    if cycle.get("pending_exit"):
+        perform_cycle_exit(cycle["pending_exit"], True)
+        return
     # Hold positions through the cycle expiry, then roll only this strategy.
     if stamp.date() >= parse_date(cycle["expiry"]) and stamp.time() >= START_TIME:
         perform_cycle_exit("EXPIRY ROLLOVER", True)
         return
     if len(cycle["legs"]) == 2:
         if cycle.get("phase") == "STRADDLE" and is_straddle(cycle) and cycle.get("straddle_credit") and sum(float(leg.get("ltp", 0)) for leg in cycle["legs"].values()) >= float(cycle["straddle_credit"]) * (1 + STRADDLE_STOP):
-            perform_cycle_exit("10% STRADDLE COMBINED PREMIUM STOP", False)
+            perform_cycle_exit("10% STRADDLE COMBINED PREMIUM STOP", True)
             return
         _, net_points, net_rupees = p_and_l(cycle)
         target = NET_PROFIT_TARGET_RUPEES
         if net_rupees >= target:
-            perform_cycle_exit("₹3,000 NET CYCLE PROFIT TARGET", True)
+            perform_cycle_exit("₹2,500 NET CYCLE PROFIT TARGET", True)
             return
         if should_roll(cycle, stamp):
             roll_low_leg(cycle, "15:25 DIVERGENCE" if stamp.time() >= ADJUST_TIME else "50% DIVERGENCE")
@@ -792,9 +1018,26 @@ def process_tick_actions():
 
 
 def main():
-    global cycle, current_spot, entry_attempted_date, pending_entry, next_entry_retry_at
+    global cycle, current_spot, entry_attempted_date, pending_entry, next_entry_retry_at, next_action_retry_at
+    if not initialize():
+        return
+    if now_ist().weekday() >= 5 or now_ist().time() >= END_TIME:
+        print("Outside weekly monitoring session; no position actions", flush=True)
+        return
     saved_state = load_latest_state()
     cycle = saved_state if saved_state and saved_state.get("status") == "ACTIVE" else None
+    if cycle and any(strike_for_leg(leg) is None for leg in cycle["legs"].values()):
+        chain = option_chain(cycle["expiry_epoch"])
+        strikes = {item.get("symbol"): item.get("strike_price") for item in chain.get("optionsChain", [])}
+        for leg in cycle["legs"].values():
+            if strike_for_leg(leg) is None:
+                if not valid_price(strikes.get(leg["symbol"])):
+                    raise RuntimeError("Cannot restore carried strike metadata")
+                leg["strike"] = float(strikes[leg["symbol"]])
+    if cycle and migrate_costs(cycle):
+        log_state(cycle, "COST BASIS MIGRATED FROM RECONCILED PAPER FILLS")
+    if cycle and is_straddle(cycle) and not cycle.get("straddle_reference_basis"):
+        raise RuntimeError("Legacy straddle needs its formation-price reference reconstructed before resuming")
     if cycle and normalize_phase(cycle):
         log_state(cycle, "RESTORED PHASE FROM ACTUAL CE/PE STRIKES")
         print(f"Restored cycle phase as {cycle['phase']} from actual contract strikes", flush=True)
@@ -810,6 +1053,8 @@ def main():
         and now_ist().weekday() == 1
     ):
         entry_attempted_date = now_ist().date()
+    if saved_state:
+        flush_events(saved_state)
     if cycle:
         print(f"Restored active paper cycle {cycle['cycle_id']} through {cycle['expiry']}", flush=True)
     else:
@@ -839,10 +1084,12 @@ def main():
     socket_holder["socket"] = sock
     threading.Thread(target=close_at_end, daemon=True).start()
     print("Connecting weekly paper monitor to FYERS market data", flush=True)
-    sock.connect()
+    threading.Thread(target=sock.connect, daemon=True).start()
 
     while not stop_event.wait(0.5):
         stamp = now_ist()
+        if not in_session():
+            break
         if cycle is None and stamp.time() >= START_TIME and stamp.weekday() == 1 and entry_attempted_date != stamp.date():
             # First cycle, or a prior stop exit: Tuesday is the weekly entry day.
             if pending_entry is None:
@@ -854,6 +1101,8 @@ def main():
                 cycle = start_cycle(after_epoch, reason, use_prepared=use_prepared)
                 pending_entry = None
                 next_entry_retry_at = None
+            except PersistenceError:
+                raise
             except Exception as exc:
                 print(
                     f"Paper entry still waiting for market data ({type(exc).__name__}); "
@@ -861,9 +1110,12 @@ def main():
                     flush=True,
                 )
                 next_entry_retry_at = stamp + timedelta(seconds=ENTRY_RETRY_SECONDS)
-        process_tick_actions()
-        if stamp.time() >= ADJUST_TIME and cycle and should_roll(cycle, stamp):
+        try:
             process_tick_actions()
+        except MarketDataError as exc:
+            # Bounded market-data failure: retain the current paper positions.
+            notice("market-failure", f"Market-data action deferred ({type(exc).__name__})")
+            next_action_retry_at = now_ist() + timedelta(seconds=15)
 
     if cycle and cycle["status"] == "ACTIVE":
         log_state(cycle, "SESSION SNAPSHOT - CARRY FORWARD")
@@ -872,4 +1124,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

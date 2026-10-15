@@ -1,0 +1,5 @@
+{
+  "id": "user-flat-75-per-leg-execution-v1",
+  "cost_per_execution": 75.0,
+  "basis": "User-specified all-in paper estimate. One sell or buyback of one leg costs INR 75; round trip INR 150. No additional tax model or slippage is applied."
+}
