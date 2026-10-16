@@ -3,10 +3,12 @@ name: Sync Straddle Dashboard
 on:
   workflow_dispatch:
   schedule:
-    # Every 15 minutes from 08:30 through 15:45 IST on weekdays.
-    - cron: '30,45 8 * * 1-5'
+    # Four weekday copies from Google Sheets; GitHub may start scheduled runs late.
+    - cron: '0 9,13 * * 1-5'
       timezone: 'Asia/Kolkata'
-    - cron: '*/15 9-15 * * 1-5'
+    - cron: '40 9 * * 1-5'
+      timezone: 'Asia/Kolkata'
+    - cron: '15 15 * * 1-5'
       timezone: 'Asia/Kolkata'
 
 permissions:
