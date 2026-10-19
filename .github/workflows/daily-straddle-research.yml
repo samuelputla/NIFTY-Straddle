@@ -1,0 +1,63 @@
+name: Daily Straddle Research Capture
+
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'
+      timezone: Asia/Kolkata
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-straddle-research-capture
+  cancel-in-progress: false
+
+jobs:
+  wait-for-research-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for 09:12 IST preparation window
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, time
+          from zoneinfo import ZoneInfo
+          import time as clock
+          tz = ZoneInfo('Asia/Kolkata')
+          target = datetime.combine(datetime.now(tz).date(), time(9, 12), tzinfo=tz)
+          while datetime.now(tz) < target:
+              clock.sleep(min(10, max(.1, (target-datetime.now(tz)).total_seconds())))
+          PY
+
+  capture:
+    needs: wait-for-research-session
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      RESEARCH_OUTPUT_DIR: research_capture
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install market-data and Sheets dependencies
+        run: pip install fyers-apiv3 gspread google-auth tzdata
+      - name: Collect research observations (no orders, separate core state)
+        run: python -u daily_straddle_research.py
+      - name: Preserve compressed raw data and quality manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-straddle-research-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            research_capture/**/*.csv.gz
+            research_capture/**/*.jsonl.gz
+            research_capture/**/*.csv
+            research_capture/**/manifest-*.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
+
