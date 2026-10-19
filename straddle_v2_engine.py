@@ -60,8 +60,9 @@ class Engine:
     def observe(self, prices, when, paired=True):
         """Chronological observed LTPs. Stops precede CTC activation/combined target.
 
-        Only fresh synchronized pairs may activate CTC or the combined target.
-        A single-leg tick may trigger that leg's stop immediately.
+        A fresh survivor tick may activate CTC; at first stop, an already-decayed
+        survivor requires a recent paired observation. Combined targets require
+        synchronized pairs. A single-leg tick may trigger its stop immediately.
         """
         s = self.state
         if s["status"] != "OPEN":
@@ -78,7 +79,7 @@ class Engine:
                 # Observed price captures gap-through losses; Rs1/SL is additional friction.
                 self.close(side, price, when, "CTC STOP" if leg["ctc"] else "STOP LOSS")
         alive = [side for side in ("CE", "PE") if s["legs"][side]["exit"] is None]
-        if paired and len(alive) == 1:
+        if len(alive) == 1 and (alive[0] in prices or paired):
             side = alive[0]
             leg = s["legs"][side]
             if not leg["ctc"] and leg["last"] <= .65 * leg["entry"]:
