@@ -344,6 +344,33 @@ def get_previous_day_ohlc(today):
     }
 
 
+
+def get_current_day_open(today):
+    """Read the official daily-candle open, never a previous day's candle or LTP."""
+    day = today.strftime("%Y-%m-%d")
+    response = call_fyers("history", {
+        "symbol": NIFTY_SYMBOL,
+        "resolution": "D",
+        "date_format": "1",
+        "range_from": day,
+        "range_to": day,
+        "cont_flag": "1",
+    })
+    if response.get("s") != "ok":
+        raise RuntimeError("NIFTY opening history unavailable")
+    for candle in response.get("candles", []):
+        try:
+            if len(candle) < 5:
+                continue
+            candle_date = datetime.fromtimestamp(float(candle[0]), IST).date()
+            opening = float(candle[1])
+            if candle_date == today and 0 < opening < float("inf"):
+                return round(opening, 2)
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+    raise RuntimeError("No valid current-day NIFTY opening candle returned")
+
+
 def nearest_atm(spot):
     return int((spot + 25) // 50) * 50
 
@@ -935,6 +962,14 @@ threading.Thread(
     daemon=True,
 ).start()
 
+# Opening history is optional: launch only AFTER the premium capture and socket start.
+# Separate deadlines keep it independent of the 15-second VIX/OI metadata window.
+opening_requests = {}
+opening_attempts = 0
+opening_next_retry = time_module.monotonic()
+opening_request_deadline = None
+opening_finished = False
+
 # The socket now processes ticks while metadata and Sheets work continues.
 with state_lock:
     scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
@@ -987,13 +1022,61 @@ def poll_entry_metadata():
     return bool(results)
 
 
+
+def poll_day_open():
+    """Poll without waiting; bounded daemon workers cannot delay entry or exit."""
+    global day_open, gap_text, opening_attempts, opening_next_retry
+    global opening_request_deadline, opening_finished, entry_data_status
+    if opening_finished or stop_event.is_set():
+        return False
+    now = time_module.monotonic()
+    results = collect_ready_requests(
+        opening_requests,
+        expired=opening_request_deadline is not None and now >= opening_request_deadline,
+    )
+    for _, (result, error) in results.items():
+        if error is None:
+            opening, retrieved_at = result
+            with state_lock:
+                day_open = opening
+                gap_text = (
+                    "Gap Up" if opening > previous_ohlc["close"]
+                    else "Gap Down" if opening < previous_ohlc["close"]
+                    else "Flat"
+                )
+                entry_data_status += (
+                    f"; OPENING FROM DAILY HISTORY at {fmt_time(retrieved_at)} IST"
+                )
+            opening_finished = True
+            print(f"NIFTY day opening {opening:.2f} retrieved at "
+                  f"{fmt_time(retrieved_at)} IST", flush=True)
+            return True
+        print(f"Opening lookup attempt {opening_attempts}/10 unavailable: "
+              f"{type(error).__name__}", flush=True)
+        opening_next_retry = now + 30
+        if opening_attempts >= 10:
+            opening_finished = True
+            entry_data_status += "; OPENING HISTORY UNAVAILABLE AFTER 10 ATTEMPTS"
+            print("Opening history retries ended; price monitoring continues.", flush=True)
+            return True
+    if not opening_requests and now >= opening_next_retry:
+        opening_attempts += 1
+        opening_request_deadline = now + 7
+        opening_requests["OPENING"] = start_request(
+            timestamped_metadata, get_current_day_open, capture_time.date(),
+        )
+    return False
+
+
+poll_day_open()
 poll_entry_metadata()
 update_scenario_rows(SL_PERCENTAGES)
 if daily_row_number is not None:
     write_daily_row("RUNNING")
 
 while not stop_event.wait(timeout=0.5):
-    changed_metadata = poll_entry_metadata()
+    changed_opening = poll_day_open()
+    changed_metadata = poll_entry_metadata() or changed_opening
     with state_lock:
         changes = set(pending_scenario_updates)
         pending_scenario_updates.clear()
