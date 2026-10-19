@@ -35,8 +35,10 @@ One strategy row/date. Stable strategy ID and date isolate state from all other
 paper/manual systems. Hidden State JSON supports restart; restarted open positions
 are review-only because unobserved price paths cannot be reconstructed.
 
-Fresh socket observations trigger stops per leg. Combined target and CTC activation
-require processed prices no more than2seconds apart. Stale source timestamps are
+Fresh socket observations trigger stops per leg and survivor CTC activation.
+Combined targets require processed prices no more than2seconds apart; immediate
+CTC activation at the first stop also requires a recent survivor observation.
+Stale source timestamps are
 rejected. Pair observations are sampled into logs every5seconds; every state
 transition has its own event. This sampled log is not a complete tick archive.
 Missing feed intervals >15seconds make the session review-only. Snapshot is queued
