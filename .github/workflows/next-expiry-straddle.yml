@@ -1,0 +1,78 @@
+name: NIFTY Next Expiry Straddle Paper Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Run a short live-feed verification instead of the full 09:30-15:00 session"
+        required: false
+        type: boolean
+        default: false
+      setup_only:
+        description: "Create or verify Google Sheets tabs and headers without contacting FYERS"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Start before the hour's peak queue and prepare contracts before the 09:30 quote request.
+    - cron: "55 8 * * 1-5"
+      timezone: "Asia/Kolkata"
+
+concurrency:
+  group: nifty-next-expiry-straddle-paper-test
+  cancel-in-progress: false
+
+jobs:
+  wait-for-session:
+    # A runner started at 08:55 would reach its six-hour cap at 14:55.
+    # Wait in a separate job; the monitoring job starts at/after 09:15.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait until 09:15 IST for scheduled monitoring
+        if: github.event_name == 'schedule'
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, time
+          from zoneinfo import ZoneInfo
+          import time as clock
+          tz = ZoneInfo("Asia/Kolkata")
+          target = datetime.combine(datetime.now(tz).date(), time(9, 15), tzinfo=tz)
+          while datetime.now(tz) < target:
+              clock.sleep(min(10, max(0.1, (target - datetime.now(tz)).total_seconds())))
+          PY
+  straddle:
+    needs: wait-for-session
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TEST_MODE: ${{ inputs.test_mode || 'false' }}
+      SETUP_ONLY: ${{ inputs.setup_only || 'false' }}
+      MONITOR_MINUTES: "2"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fyers-apiv3 gspread google-auth tzdata requests
+
+      - name: Run NIFTY straddle
+        run: python -u next_expiry_straddle.py
+
+      - name: Sync all separate strategy snapshots to dashboard
+        if: always()
+        env:
+          STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
+        run: python -u sync_dashboard.py
+
