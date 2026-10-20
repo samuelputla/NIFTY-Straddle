@@ -58,6 +58,14 @@ def main():
         if not v2_values:
             raise RuntimeError("V2 sheet returned no headers")
         send("Straddle V2 Strategy", v2_values, token)
+        next_expiry = read_values(session, "'Next Expiry Straddle'!A1:BN1000")
+        if next_expiry.status_code != 200:
+            raise RuntimeError("Google Sheets read failed for next-expiry study")
+        next_values = next_expiry.json().get("values", [])
+        if not next_values:
+            raise RuntimeError("Next-expiry sheet returned no headers")
+        send("Next Expiry Straddle", next_values, token)
+
 
     except Exception as exc:
         sys.exit(f"Sync failed ({type(exc).__name__}); no credentials or sheet data logged.")
@@ -65,4 +73,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
