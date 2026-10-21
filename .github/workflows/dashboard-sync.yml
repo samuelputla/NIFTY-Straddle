@@ -3,13 +3,11 @@ name: Sync Straddle Dashboard
 on:
   workflow_dispatch:
   schedule:
+    # Explicit UTC (IST = UTC + 05:30); GitHub delivery remains best effort.
     # Four weekday copies from Google Sheets; GitHub may start scheduled runs late.
-    - cron: '0 9,13 * * 1-5'
-      timezone: 'Asia/Kolkata'
-    - cron: '40 9 * * 1-5'
-      timezone: 'Asia/Kolkata'
-    - cron: '15 15 * * 1-5'
-      timezone: 'Asia/Kolkata'
+    - cron: '30 3,7 * * 1-5'
+    - cron: '10 4 * * 1-5'
+    - cron: '45 9 * * 1-5'
 
 permissions:
   contents: read
@@ -34,4 +32,3 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
         run: python -u sync_dashboard.py
-
