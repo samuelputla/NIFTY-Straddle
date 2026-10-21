@@ -2,8 +2,8 @@ name: Straddle V2 Paper Observer
 
 on:
   schedule:
-    - cron: '10 9 * * 1-5'
-      timezone: Asia/Kolkata
+    # Explicit UTC (IST = UTC + 05:30); GitHub delivery remains best effort.
+    - cron: '40 3 * * 1-5'
   workflow_dispatch:
     inputs:
       setup_only:
@@ -37,4 +37,3 @@ jobs:
         env:
           STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
         run: python -u sync_dashboard.py
-
