@@ -43,8 +43,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-paper.txt
+      - name: Record actual runner startup
+        run: python session_timing.py runner-start
       - name: Install market-data and Sheets dependencies
-        run: pip install fyers-apiv3 gspread google-auth tzdata
+        run: python -m pip install -r requirements-paper.txt
+      - name: Record collector readiness
+        run: python session_timing.py collector-ready
       - name: Collect research observations (no orders, separate core state)
         run: python -u daily_straddle_research.py
       - name: Preserve compressed raw data and quality manifest
