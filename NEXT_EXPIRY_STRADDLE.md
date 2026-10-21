@@ -53,7 +53,7 @@ entry. Exact symbols come from returned data, never string construction.
 Its own process, concurrency group, Sheet rows and two-option subscription keep
 position state separate. FYERS account quotas and GitHub runners are still
 shared resources; zero indirect impact cannot be guaranteed. Optional requests
-are deferred, but core/V2 quotas are not changed by this PR. No order API exists.
+are deferred, but core quotas are not changed by this PR. No order API exists.
 
 The workflow follows the core's 08:55 IST queue time and separate wait job to
 09:15, keeping monitoring below GitHub's six-hour job cap. Known remaining 2026
@@ -66,9 +66,9 @@ not invented as 09:30. The core's scheduling is untouched.
 - `Next Expiry Straddle`: same 66-column daily schema, separate rows and results.
 - `Next Expiry Straddle Logs`: same 29-column per-SL schema, separate run type.
 - `Next Expiry Straddle` dashboard navigation: own snapshot, endpoint, dates,
-  comparisons, exports and journal. Existing core and Synthetic-forward results
+  comparisons, exports and journal. Existing core results
   remain in their existing snapshots. The refresh button reads all three tabs;
-  scheduled dashboard sync adds this tab after existing core/V2 uploads.
+  scheduled dashboard sync adds this tab after the existing core upload.
 - No historical results are fabricated. First forward paper observation is the
   next eligible market session after merge. Source Sheet tabs begin headers-only.
 

@@ -51,13 +51,6 @@ def main():
         if not daily_values:
             raise RuntimeError(f"{DAILY_SHEET} returned no headers; previous dashboard data remains saved.")
         send(DAILY_SHEET, daily_values, token)
-        v2 = read_values(session, "'Straddle V2 Strategy'!A1:AZ1000")
-        if v2.status_code != 200:
-            raise RuntimeError(f"Google Sheets read failed for V2: HTTP {v2.status_code}")
-        v2_values = v2.json().get("values", [])
-        if not v2_values:
-            raise RuntimeError("V2 sheet returned no headers")
-        send("Straddle V2 Strategy", v2_values, token)
         next_expiry = read_values(session, "'Next Expiry Straddle'!A1:BN1000")
         if next_expiry.status_code != 200:
             raise RuntimeError("Google Sheets read failed for next-expiry study")
