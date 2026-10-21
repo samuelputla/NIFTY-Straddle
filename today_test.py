@@ -311,6 +311,32 @@ def ltp_from_quote(values, label):
 
 
 
+def classify_gap(opening, previous_close):
+    if opening in ("", None) or previous_close in ("", None):
+        return "Unavailable"
+    return "Gap Up" if opening > previous_close else "Gap Down" if opening < previous_close else "Flat"
+
+
+def poll_previous_history():
+    """Optional context starts after the websocket; never gates premium capture."""
+    global previous_started, previous_deadline, previous_ohlc, gap_text, entry_data_status
+    if not previous_started:
+        previous_requests["PREVIOUS"] = start_request(get_previous_day_ohlc, capture_time.date())
+        previous_deadline = time_module.monotonic() + 7
+        previous_started = True
+    results = collect_ready_requests(previous_requests, expired=time_module.monotonic() >= previous_deadline)
+    for _, (value, error) in results.items():
+        if error is not None:
+            entry_data_status += "; PREVIOUS SESSION HISTORY UNAVAILABLE"
+            print(f"Previous session history unavailable: {type(error).__name__}; premium monitoring continues.", flush=True)
+        else:
+            previous_ohlc = value
+            gap_text = classify_gap(day_open, value["close"])
+            entry_data_status += f"; PREVIOUS SESSION HISTORY {value['date']}"
+            print(f"Previous market-day candle loaded for {value['date']} after premium capture.", flush=True)
+    return bool(results)
+
+
 def get_previous_day_ohlc(today):
     start = (today - timedelta(days=10)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
@@ -712,12 +738,11 @@ def enforce_entry_deadline():
 
 
 enforce_entry_deadline()
-print("Fetching previous market-day NIFTY values...", flush=True)
-previous_ohlc = get_previous_day_ohlc(today)
-print(
-    f"Previous market-day candle loaded for {previous_ohlc['date']}.",
-    flush=True,
-)
+# Missing optional context must not abort or delay the 09:30 premium entry.
+previous_ohlc = {"date": None, "high": "", "low": "", "close": ""}
+previous_requests = {}
+previous_started = False
+previous_deadline = float("inf")
 
 enforce_entry_deadline()
 
@@ -823,11 +848,9 @@ def timestamped_metadata(function, *args):
     return value, now_ist()
 
 
-metadata_requests = {
-    "VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL]),
-    "OI": start_request(timestamped_metadata, refresh_optionchain_for_oi),
-}
-metadata_deadline = time_module.monotonic() + 15
+metadata_requests = {}
+metadata_started = False
+metadata_deadline = float("inf")
 while True:
     enforce_entry_deadline()
     try:
@@ -884,12 +907,7 @@ if not TEST_MODE and delay > 5:
     entry_data_status += f"; LATE ENTRY +{delay:.1f}s"
 entry_data_status += "; SPOT FROM PRE-ENTRY CONTRACT SNAPSHOT"
 
-gap_text = (
-    "Unavailable" if day_open == ""
-    else "Gap Up" if day_open > previous_ohlc["close"]
-    else "Gap Down" if day_open < previous_ohlc["close"]
-    else "Flat"
-)
+gap_text = classify_gap(day_open, previous_ohlc["close"])
 
 ce_sl_values = [round(ce_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
 pe_sl_values = [round(pe_entry * (1 + p / 100), 2) for p in SL_PERCENTAGES]
@@ -1015,8 +1033,18 @@ print(
 
 
 def poll_entry_metadata():
+    previous_changed = poll_previous_history()
     global india_vix, vix_retrieved_at, vix_snapshot_status
     global call_oi, put_oi, pcr, market_bias, oi_retrieved_at, oi_snapshot_status
+    global metadata_started, metadata_deadline
+    if not metadata_started:
+        # Entry premiums and the live socket are already established.
+        metadata_requests.update({
+            "VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL]),
+            "OI": start_request(timestamped_metadata, refresh_optionchain_for_oi),
+        })
+        metadata_deadline = time_module.monotonic() + 15
+        metadata_started = True
     results = collect_ready_requests(
         metadata_requests, expired=time_module.monotonic() >= metadata_deadline,
     )
@@ -1049,7 +1077,7 @@ def poll_entry_metadata():
                 oi_snapshot_status = "PRE-ENTRY FALLBACK: entry refresh unavailable"
             print(f"{name} metadata unavailable: {type(exc).__name__}", flush=True)
     # Entry premiums, entry timestamp, stop thresholds and fills are never changed here.
-    return bool(results)
+    return bool(results) or previous_changed
 
 
 
@@ -1069,11 +1097,7 @@ def poll_day_open():
             opening, retrieved_at = result
             with state_lock:
                 day_open = opening
-                gap_text = (
-                    "Gap Up" if opening > previous_ohlc["close"]
-                    else "Gap Down" if opening < previous_ohlc["close"]
-                    else "Flat"
-                )
+                gap_text = classify_gap(opening, previous_ohlc["close"])
                 entry_data_status += (
                     f"; OPENING FROM DAILY HISTORY at {fmt_time(retrieved_at)} IST"
                 )
@@ -1195,3 +1219,4 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
