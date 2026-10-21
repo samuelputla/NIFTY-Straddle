@@ -14,9 +14,9 @@ on:
         type: boolean
         default: false
   schedule:
+    # Explicit UTC (IST = UTC + 05:30); GitHub delivery remains best effort.
     # Start before the hour's peak queue and prepare contracts before the 09:30 quote request.
-    - cron: "55 8 * * 1-5"
-      timezone: "Asia/Kolkata"
+    - cron: "25 3 * * 1-5"
 
 concurrency:
   group: nifty-next-expiry-straddle-paper-test
@@ -29,8 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Wait until 09:15 IST for scheduled monitoring
-        if: github.event_name == 'schedule'
+      - name: Wait until 09:15 IST for full-session monitoring
+        if: ${{ !inputs.test_mode && !inputs.setup_only }}
         run: |
           python3 - <<'PY'
           from datetime import datetime, time
@@ -75,4 +75,3 @@ jobs:
         env:
           STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
         run: python -u sync_dashboard.py
-

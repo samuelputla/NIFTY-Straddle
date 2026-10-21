@@ -21,6 +21,7 @@ SPREADSHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
 IST = ZoneInfo("Asia/Kolkata")
 TARGET_TIME = time(9, 30)
 EXIT_TIME = time(15, 0)
+LATEST_ENTRY_TIME = time(9, 35)
 SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
 CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
@@ -669,12 +670,6 @@ def close_at_end(end_dt):
 # PREPARE CONTRACTS BEFORE 09:30, THEN CAPTURE ENTRY QUOTES
 # ============================================================
 today = now_ist().date()
-print("Fetching previous market-day NIFTY values...", flush=True)
-previous_ohlc = get_previous_day_ohlc(today)
-print(
-    f"Previous market-day candle loaded for {previous_ohlc['date']}.",
-    flush=True,
-)
 daily_row_number = None
 if not TEST_MODE:
     summary_rows = daily_sheet.get_all_values()
@@ -690,10 +685,41 @@ if not TEST_MODE:
 
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)
 prep_dt = target_dt - timedelta(minutes=5)
-entry_deadline = datetime.combine(today, EXIT_TIME, tzinfo=IST)
-if not TEST_MODE and now_ist() >= entry_deadline:
-    print("Market monitoring window has ended; no new daily entry will be created.")
-    sys.exit(0)
+entry_deadline = datetime.combine(today, LATEST_ENTRY_TIME, tzinfo=IST)
+
+
+def enforce_entry_deadline():
+    """Record a missed session without creating prices, P&L, or paper positions."""
+    checked_at = now_ist()
+    if TEST_MODE or checked_at <= entry_deadline:
+        return
+    blank = [""] * len(DAILY_HEADERS)
+    blank[0] = today.isoformat()
+    blank[DAILY_HEADERS.index("Run Status")] = "MISSED ENTRY WINDOW"
+    blank[DAILY_HEADERS.index("Entry Data Status")] = (
+        f"NO ENTRY: 09:35 IST cutoff exceeded; checked {checked_at.isoformat()}"
+    )
+    daily_sheet.update(
+        range_name=f"A{daily_row_number}:{column_letter(len(DAILY_HEADERS))}{daily_row_number}",
+        values=[blank], value_input_option="RAW",
+    )
+    print("MISSED ENTRY WINDOW: no paper position opened after 09:35 IST.", flush=True)
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as summary:
+            summary.write(f"\\n{DAILY_SHEET_NAME}: missed 09:35 IST entry cutoff. No position opened.\\n")
+    raise SystemExit(0)
+
+
+enforce_entry_deadline()
+print("Fetching previous market-day NIFTY values...", flush=True)
+previous_ohlc = get_previous_day_ohlc(today)
+print(
+    f"Previous market-day candle loaded for {previous_ohlc['date']}.",
+    flush=True,
+)
+
+enforce_entry_deadline()
 
 if not TEST_MODE:
     print("Preparing NIFTY/VIX and option contracts before 09:30 IST...")
@@ -705,6 +731,7 @@ else:
 # Select the ATM strike and expiry using NIFTY spot only; VIX has no strike selection.
 print("Preparing ATM contracts from the option-chain underlying...", flush=True)
 while True:
+    enforce_entry_deadline()
     try:
         optionchain_response = call_fyers("optionchain", {
             "symbol": NIFTY_SYMBOL, "strikecount": 50, "timestamp": "",
@@ -724,7 +751,8 @@ while True:
         break
     except Exception as exc:
         print(f"Contract preparation retry: {type(exc).__name__}", flush=True)
-        if TEST_MODE or now_ist() >= entry_deadline:
+        enforce_entry_deadline()
+        if TEST_MODE:
             raise
         time_module.sleep(1)
 
@@ -766,6 +794,7 @@ if not TEST_MODE:
     print("Waiting for the 09:30 IST entry quote...")
     while now_ist() < target_dt:
         time_module.sleep(0.05)
+    enforce_entry_deadline()
     quote_request_started_at = now_ist()
     late_seconds = (quote_request_started_at - target_dt).total_seconds()
     if late_seconds > 5: print(f"Late capture; continuing at {fmt_time(quote_request_started_at)} IST")
@@ -800,17 +829,18 @@ metadata_requests = {
 }
 metadata_deadline = time_module.monotonic() + 15
 while True:
+    enforce_entry_deadline()
     try:
         entry_snapshot = get_quotes([ce_symbol, pe_symbol])
         ltp_from_quote(entry_snapshot[ce_symbol], "CE")
         ltp_from_quote(entry_snapshot[pe_symbol], "PE")
         capture_time = now_ist()
-        if not TEST_MODE and capture_time >= entry_deadline:
-            raise RuntimeError("No usable entry pair before the daily close")
+        enforce_entry_deadline()
         break
     except Exception as exc:
         print(f"Entry quote retry: {type(exc).__name__}", flush=True)
-        if TEST_MODE or now_ist() >= entry_deadline:
+        enforce_entry_deadline()
+        if TEST_MODE:
             raise
         time_module.sleep(1)
 
@@ -1165,6 +1195,3 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
-
-
-
