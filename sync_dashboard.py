@@ -51,7 +51,7 @@ def main():
         if not daily_values:
             raise RuntimeError(f"{DAILY_SHEET} returned no headers; previous dashboard data remains saved.")
         send(DAILY_SHEET, daily_values, token)
-        next_expiry = read_values(session, "'Next Expiry Straddle'!A1:BN1000")
+        next_expiry = read_values(session, "'Next Expiry Straddle'!A1:BX1000")
         if next_expiry.status_code != 200:
             raise RuntimeError("Google Sheets read failed for next-expiry study")
         next_values = next_expiry.json().get("values", [])

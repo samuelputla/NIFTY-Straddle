@@ -22,7 +22,9 @@ IST = ZoneInfo("Asia/Kolkata")
 TARGET_TIME = time(9, 30)
 EXIT_TIME = time(15, 0)
 LATEST_ENTRY_TIME = time(9, 35)
-SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
+LEGACY_SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
+EXTRA_SL_PERCENTAGES = [45, 50]
+SL_PERCENTAGES = LEGACY_SL_PERCENTAGES + EXTRA_SL_PERCENTAGES
 CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
@@ -65,11 +67,11 @@ DAILY_HEADERS = [
     "Day PE Low Premium",
     "CE Exit Price",
     "PE Exit Price",
-    *[f"{p}% Profit" for p in SL_PERCENTAGES],
-    *[f"{p}% CE Net" for p in SL_PERCENTAGES],
-    *[f"{p}% PE Net" for p in SL_PERCENTAGES],
-    *[f"{p}% CE SL" for p in SL_PERCENTAGES],
-    *[f"{p}% PE SL" for p in SL_PERCENTAGES],
+    *[f"{p}% Profit" for p in LEGACY_SL_PERCENTAGES],
+    *[f"{p}% CE Net" for p in LEGACY_SL_PERCENTAGES],
+    *[f"{p}% PE Net" for p in LEGACY_SL_PERCENTAGES],
+    *[f"{p}% CE SL" for p in LEGACY_SL_PERCENTAGES],
+    *[f"{p}% PE SL" for p in LEGACY_SL_PERCENTAGES],
     "Entry Quote Request Started At (IST)",
     "Entry Snapshot Retrieved At (IST)",
     "CE LTP Last Trade Time (IST)",
@@ -81,6 +83,8 @@ DAILY_HEADERS = [
     "Run Status",
     "VIX Snapshot Retrieved At (IST)",
 ]
+
+DAILY_HEADERS += [f"{p}% {field}" for p in EXTRA_SL_PERCENTAGES for field in ("Profit", "CE Net", "PE Net", "CE SL", "PE SL")]
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -546,16 +550,16 @@ def make_daily_row(run_status):
         round(state["final_pe_ltp"], 2)
         if state["final_pe_ltp"] is not None else "",
     ]
-    values.extend(scenario_nets[p][0] for p in SL_PERCENTAGES)
-    values.extend(scenario_nets[p][1] for p in SL_PERCENTAGES)
-    values.extend(scenario_nets[p][2] for p in SL_PERCENTAGES)
+    values.extend(scenario_nets[p][0] for p in LEGACY_SL_PERCENTAGES)
+    values.extend(scenario_nets[p][1] for p in LEGACY_SL_PERCENTAGES)
+    values.extend(scenario_nets[p][2] for p in LEGACY_SL_PERCENTAGES)
     values.extend(
         sl_cell(state["scenarios"][p], "ce", ce_sl_values[i])
-        for i, p in enumerate(SL_PERCENTAGES)
+        for i, p in enumerate(LEGACY_SL_PERCENTAGES)
     )
     values.extend(
         sl_cell(state["scenarios"][p], "pe", pe_sl_values[i])
-        for i, p in enumerate(SL_PERCENTAGES)
+        for i, p in enumerate(LEGACY_SL_PERCENTAGES)
     )
     values.extend([
         fmt_time(quote_request_started_at),
@@ -569,6 +573,12 @@ def make_daily_row(run_status):
         run_status,
         vix_retrieved_at.strftime("%Y-%m-%d %H:%M:%S") if vix_retrieved_at else "",
     ])
+    for p in EXTRA_SL_PERCENTAGES:
+        index = SL_PERCENTAGES.index(p)
+        values.extend([*scenario_nets[p],
+            sl_cell(state["scenarios"][p], "ce", ce_sl_values[index]),
+            sl_cell(state["scenarios"][p], "pe", pe_sl_values[index])])
+    assert len(values) == len(DAILY_HEADERS)
     return values
 
 
@@ -1219,4 +1229,3 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
-
