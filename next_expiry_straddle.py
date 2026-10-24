@@ -97,6 +97,8 @@ if not TEST_MODE and (datetime.now(IST).weekday() >= 5 or datetime.now(IST).date
     sys.exit(0)
 
 DAILY_HEADERS += [f"{p}% {field}" for p in EXTRA_SL_PERCENTAGES for field in ("Profit", "CE Net", "PE Net", "CE SL", "PE SL")]
+DAILY_HEADERS += ["Weekday", "Gap %", "CE OI Contracts", "PE OI Contracts", "OI Lot Size", "OI Unit Basis"]
+SCENARIO_HEADERS += ["Weekday"]
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -550,6 +552,7 @@ def make_scenario_row(percent):
         status,
         fmt_time(now_ist()),
         RUN_TYPE,
+        capture_time.strftime("%A"),
     ]
 
 
@@ -663,6 +666,14 @@ def make_daily_row(run_status):
         values.extend([*scenario_nets[p],
             sl_cell(state["scenarios"][p], "ce", ce_sl_values[index]),
             sl_cell(state["scenarios"][p], "pe", pe_sl_values[index])])
+    gap_pct = round((float(day_open) - float(previous_ohlc["close"])) / float(previous_ohlc["close"]) * 100, 4) if day_open not in ("", None) and previous_ohlc["close"] not in ("", None, 0) else ""
+    # Preserve original quantities; expose an explicit conversion for this 65-unit study.
+    oi_valid = call_oi >= 0 and put_oi >= 0 and call_oi % CONTRACT_QTY == 0 and put_oi % CONTRACT_QTY == 0 and "unavailable" not in oi_snapshot_status.lower()
+    values.extend([capture_time.strftime("%A"), gap_pct,
+        int(call_oi / CONTRACT_QTY) if oi_valid else "",
+        int(put_oi / CONTRACT_QTY) if oi_valid else "",
+        CONTRACT_QTY if oi_valid else "",
+        "FYERS raw quantities / 65 units per contract; exchange match requires same expiry/strikes/time" if oi_valid else "OI units or snapshot unavailable; conversion withheld"])
     assert len(values) == len(DAILY_HEADERS)
     return values
 
