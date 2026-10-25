@@ -1,4 +1,4 @@
-name: NIFTY Straddle Paper Test
+name: Current Week Expiry
 
 on:
   workflow_dispatch:
@@ -82,4 +82,5 @@ jobs:
         env:
           STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
         run: python -u sync_dashboard.py
+
 

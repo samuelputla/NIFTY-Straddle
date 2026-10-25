@@ -2,6 +2,7 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+from expiry_metrics import calendar_dte
 import json
 import os
 import sys
@@ -29,8 +30,8 @@ CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SCENARIO_SHEET_NAME = "Nifty Daily Straddle Logs"
-DAILY_SHEET_NAME = "Nifty Daily straddle"
+SCENARIO_SHEET_NAME = "Current Week Expiry Logs"
+DAILY_SHEET_NAME = "Current Week Expiry"
 
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
@@ -86,7 +87,8 @@ DAILY_HEADERS = [
 
 DAILY_HEADERS += [f"{p}% {field}" for p in EXTRA_SL_PERCENTAGES for field in ("Profit", "CE Net", "PE Net", "CE SL", "PE SL")]
 DAILY_HEADERS += ["Weekday", "Gap %", "CE OI Contracts", "PE OI Contracts", "OI Lot Size", "OI Unit Basis"]
-SCENARIO_HEADERS += ["Weekday"]
+SCENARIO_HEADERS += ["Weekday", "DTE"]
+DAILY_HEADERS += ["DTE"]
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -468,6 +470,7 @@ def make_scenario_row(percent):
         fmt_time(now_ist()),
         RUN_TYPE,
         capture_time.strftime("%A"),
+        calendar_dte(capture_time.date(), expiry["date"]),
     ]
 
 
@@ -476,7 +479,7 @@ def append_scenario_rows(rows):
     first_row = max(2, len(existing) + 1)
     last_row = first_row + len(rows) - 1
     scenario_sheet.update(
-        range_name=f"A{first_row}:AC{last_row}",
+        range_name=f"A{first_row}:{column_letter(len(SCENARIO_HEADERS))}{last_row}",
         values=rows,
         value_input_option="RAW",
     )
@@ -489,7 +492,7 @@ def update_scenario_rows(percentages):
         for percent in sorted(set(percentages)):
             row_number = scenario_row_numbers[percent]
             updates.append({
-                "range": f"A{row_number}:AC{row_number}",
+                "range": f"A{row_number}:{column_letter(len(SCENARIO_HEADERS))}{row_number}",
                 "values": [make_scenario_row(percent)],
             })
     if updates:
@@ -589,6 +592,7 @@ def make_daily_row(run_status):
         int(put_oi / CONTRACT_QTY) if oi_valid else "",
         CONTRACT_QTY if oi_valid else "",
         "FYERS raw quantities / 65 units per contract; exchange match requires same expiry/strikes/time" if oi_valid else "OI units or snapshot unavailable; conversion withheld"])
+    values.append(calendar_dte(capture_time.date(), expiry["date"]))
     assert len(values) == len(DAILY_HEADERS)
     return values
 
@@ -1240,3 +1244,4 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+

@@ -25,7 +25,7 @@ NIFTY futures contract, and at most five nearby CE/PE strike pairs plus the
 core's exact CE/PE. Hard limit: 17 active symbols. After the core confirms its
 entry, the nearby band is frozen; the chosen core options remain subscribed
 through the end even if stopped. The selected contracts come from **read-only**
-`Nifty Daily Straddle Logs` rows for today's `SCHEDULED PAPER` run, not from
+`Current Week Expiry Logs` rows for today's `SCHEDULED PAPER` run, not from
 guessed symbols or other strategies. Multiple different core
 entries are flagged rather than silently combined.
 
