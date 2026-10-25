@@ -1,4 +1,4 @@
-# NIFTY Next Expiry Straddle — separate paper study
+# NIFTY Next Week Expiry — separate paper study
 
 ## Expiry rule confirmed on 20 October 2026
 
@@ -63,9 +63,9 @@ not invented as 09:30. The core's scheduling is untouched.
 
 ## Separate data and dashboard
 
-- `Next Expiry Straddle`: same 66-column daily schema, separate rows and results.
-- `Next Expiry Straddle Logs`: same 29-column per-SL schema, separate run type.
-- `Next Expiry Straddle` dashboard navigation: own snapshot, endpoint, dates,
+- `Next Week Expiry`: same 83-column daily schema, separate rows and results.
+- `Next Week Expiry Logs`: same 31-column per-SL schema, separate run type.
+- `Next Week Expiry` dashboard navigation: own snapshot, endpoint, dates,
   comparisons, exports and journal. Existing core results
   remain in their existing snapshots. The refresh button reads all three tabs;
   scheduled dashboard sync adds this tab after the existing core upload.

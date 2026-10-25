@@ -9,7 +9,7 @@ from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
 
 SHEET_ID = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
-DAILY_SHEET = "Nifty Daily straddle"
+DAILY_SHEET = "Current Week Expiry"
 DESTINATION = "https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/sync"
 SOURCE = "https://sheets.googleapis.com/v4/spreadsheets/" + SHEET_ID + "/values/"
 
@@ -51,13 +51,18 @@ def main():
         if not daily_values:
             raise RuntimeError(f"{DAILY_SHEET} returned no headers; previous dashboard data remains saved.")
         send(DAILY_SHEET, daily_values, token)
-        next_expiry = read_values(session, "'Next Expiry Straddle'!A1:CD1000")
+        next_expiry = read_values(session, "'Next Week Expiry'!A1:CE1000")
         if next_expiry.status_code != 200:
             raise RuntimeError("Google Sheets read failed for next-expiry study")
         next_values = next_expiry.json().get("values", [])
         if not next_values:
             raise RuntimeError("Next-expiry sheet returned no headers")
-        send("Next Expiry Straddle", next_values, token)
+        send("Next Week Expiry", next_values, token)
+        monthly = read_values(session, "'Monthly Expiry'!A1:CE1000")
+        if monthly.status_code != 200 or not monthly.json().get("values"):
+            raise RuntimeError("Monthly Expiry sheet unavailable")
+        send("Monthly Expiry", monthly.json()["values"], token)
+
 
 
     except Exception as exc:
@@ -66,3 +71,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
