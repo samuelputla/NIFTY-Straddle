@@ -1,4 +1,4 @@
-name: Current Week Expiry
+name: Fixed Entry Straddles
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
     - cron: "25 3 * * 1-5"
 
 concurrency:
-  group: nifty-straddle-paper-test
+  group: nifty-fixed-entry-paper
   cancel-in-progress: false
 
 jobs:
@@ -42,7 +42,27 @@ jobs:
               clock.sleep(min(10, max(0.1, (target - datetime.now(tz)).total_seconds())))
           PY
   straddle:
+    name: ${{ matrix.name }}
     needs: wait-for-session
+    # One failed expiry must not cancel the other collectors.
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - name: Current Week Expiry
+            script: today_test.py
+            concurrency: nifty-straddle-paper-test
+          - name: Next Week Expiry
+            script: next_expiry_straddle.py
+            concurrency: nifty-next-expiry-straddle-paper-test
+          - name: Monthly Expiry
+            script: monthly_expiry_straddle.py
+            concurrency: nifty-monthly-expiry-straddle-paper-test
+    # Retain each old strategy's concurrency lock during the migration.
+    concurrency:
+      group: ${{ matrix.concurrency }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -74,11 +94,11 @@ jobs:
       - name: Record collector readiness
         run: python session_timing.py collector-ready
 
-      - name: Run NIFTY straddle
-        run: python -u today_test.py
+      - name: Run selected fixed-entry straddle
+        run: python -u ${{ matrix.script }}
 
       - name: Sync strategy snapshots even after a missed entry
-        if: always()
+        if: ${{ always() && !inputs.setup_only }}
         env:
           STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
         run: python -u sync_dashboard.py
