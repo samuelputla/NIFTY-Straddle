@@ -98,8 +98,11 @@ class Study:
    else:
     opened=cy.open_legs()
     if not opened or len(sc.cycles)>=3:continue
-    if not all(l.symbol in greeks and good(greeks[l.symbol]) for l in opened):continue
-    current=-sum(greeks[l.symbol] for l in opened)
+    # Signal uses BOTH original contracts, including a leg already stopped out.
+    # Only surviving positions are closed or contribute further open P&L.
+    tracked=cy.legs.values()
+    if not all(l.symbol in greeks and good(greeks[l.symbol]) and -1<=greeks[l.symbol]<=1 for l in tracked):continue
+    current=-sum(greeks[l.symbol] for l in cy.legs.values())
     if abs(current-cy.reference)<=DELTA_TRIGGER+1e-12:continue
     if not valid_pair(pair,now,True) or abs(net_delta(pair))>=abs(current):continue
     if not all(l.symbol in quotes for l in opened):continue
