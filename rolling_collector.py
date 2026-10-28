@@ -162,7 +162,7 @@ def main():
      wanted|={l.symbol for sc in study.scenarios.values() if sc.active for l in sc.active.open_legs()}
      if connected.is_set() and wanted-subscriptions:socket.subscribe(symbols=sorted(wanted-subscriptions),data_type='SymbolUpdate');subscriptions|=wanted
      if clock>=dt_time(9,30):
-      if study.family=='Delta Based' and any(l.symbol not in gs for sc in study.scenarios.values() if sc.active for l in sc.active.open_legs()):study.issue('Open-leg Greeks missing; delta rolls paused')
+      if study.family=='Delta Based' and any(l.symbol not in gs for sc in study.scenarios.values() if sc.active and sc.active.open_legs() and len(sc.cycles)<3 for l in sc.active.legs.values()):study.issue('Original-pair Greeks missing; delta rolls paused')
       snapshot_clock=chains[study.expiry]['requested'][11:19]
       needs_clock='09:30:00' if not study.initial_at else '13:10:00' if study.family=='Time Based' and now().time()>=dt_time(13,10) else '11:20:00' if study.family=='Time Based' and now().time()>=dt_time(11,20) else '00:00:00'
       if snapshot_clock>=needs_clock:study.advance(now().isoformat(),pair,qs,gs,time.monotonic())
