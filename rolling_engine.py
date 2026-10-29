@@ -119,7 +119,12 @@ class Study:
   rows=[]
   for sc in self.scenarios.values():
    for c in sc.cycles:
-    if not c.close_at:continue
-    ce,pe=c.legs['CE'],c.legs['PE'];points=[round(l.entry-l.exit,2) for l in (ce,pe)]
-    rows.append([f'{self.day}|{self.family}|{self.choice}|{sc.pct}|{c.number}',self.day,self.family,self.choice,sc.pct,c.number,self.expiry,c.strike,c.entry_at,c.entry_spot,c.reference if c.reference is not None else '',ce.symbol,pe.symbol,ce.entry,pe.entry,ce.exit,pe.exit,ce.exit_at,pe.exit_at,ce.reason,pe.reason,*points,round(sum(points)*QTY-CYCLE_COST,2),CYCLE_COST,c.close_at,c.close_delta if c.close_delta is not None else '',c.delta_changed if c.delta_changed is not None else '', '; '.join(self.issues)])
+    if not c.close_at and self.family!='Delta Based':continue
+    ce,pe=c.legs['CE'],c.legs['PE']
+    points=[round(l.entry-l.exit,2) if l.exit is not None else '' for l in (ce,pe)]
+    settled=all(l.exit is not None for l in (ce,pe))
+    status=list(self.issues)
+    if not c.close_at:status.insert(0,'OPEN CYCLE' if c.open_legs() else 'FLAT; awaiting session finalization')
+    rows.append([f'{self.day}|{self.family}|{self.choice}|{sc.pct}|{c.number}',self.day,self.family,self.choice,sc.pct,c.number,self.expiry,c.strike,c.entry_at,c.entry_spot,c.reference if c.reference is not None else '',ce.symbol,pe.symbol,ce.entry,pe.entry,ce.exit if ce.exit is not None else '',pe.exit if pe.exit is not None else '',ce.exit_at,pe.exit_at,ce.reason,pe.reason,*points,round(sum(points)*QTY-CYCLE_COST,2) if settled else '',CYCLE_COST,c.close_at,c.close_delta if c.close_delta is not None else '',c.delta_changed if c.delta_changed is not None else '', '; '.join(status)])
   return rows
+
