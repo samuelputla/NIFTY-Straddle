@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime,time as dt_time
 from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
+from rolling_log_updates import plan_delta_log_updates
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
 def title(family,choice):return f'{family} - {choice}'
@@ -81,6 +82,12 @@ def main():
   updates=[]
   for name,row in summaries:updates.append({'range':f"'{name}'!A{row_numbers[name]}",'values':[row]})
   for name,allrows in logsets:
+   if name.startswith('Delta Based - '):
+    # Re-read outside the callback lock. Same-ID updates finalize entry rows,
+    # and a retry after an uncertain write cannot append another copy.
+    existing_rows=sheets[name].get_all_values()
+    updates.extend(plan_delta_log_updates(name,existing_rows,allrows))
+    continue
    rows=[r for r in allrows if r[0] not in seen[name]]
    if rows:
     known={r[0] for r in sheets[name].get_all_values()[1:] if r};rows=[r for r in rows if r[0] not in known]
@@ -180,4 +187,5 @@ def main():
   time.sleep(.5)
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
 
