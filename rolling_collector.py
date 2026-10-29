@@ -5,6 +5,7 @@ from datetime import datetime,time as dt_time
 from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
 from rolling_log_updates import plan_delta_log_updates
+from quote_quality import quote_prices
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
 def title(family,choice):return f'{family} - {choice}'
@@ -57,6 +58,15 @@ def main():
  if month not in available:raise RuntimeError('Monthly expiry not cross-verified')
  expiry_map=dict(zip(CHOICES,[available[0],available[1],month]));studies=[Study(f,c,expiry_map[c],day) for f in ['Time Based','Delta Based'] for c in CHOICES]
  lock=threading.RLock();prices={};chains={};subscriptions=set();connected=threading.Event();ever_connected=False;disconnected=None
+ metadata_notes=[];vix_result={};vix_started=False;reset_diagnostics={};reset_attempts={}
+ def fetch_vix():
+  # Optional context runs independently; it cannot block entry/reset quote processing.
+  try:
+   response=call('quotes',{'symbols':'NSE:INDIAVIX-INDEX'})
+   value=quote_prices(response,['NSE:INDIAVIX-INDEX'])['NSE:INDIAVIX-INDEX']
+   with lock:vix_result.update(value=value,at=now().isoformat())
+  except Exception as error:
+   with lock:vix_result.update(error=type(error).__name__,at=now().isoformat())
  def on_message(message):
   if not isinstance(message,dict):return
   symbol=message.get('symbol');price=message.get('ltp')
@@ -78,7 +88,11 @@ def main():
    state={'asof':at,'studies':[__import__('dataclasses').asdict(study) for study in studies]}
    summaries=[(title(study.family,study.choice),study.summary(at)) for study in studies]
    logsets=[(title(study.family,study.choice)+' Logs',study.logs()) for study in studies]
+  state['reset_diagnostics']=dict(reset_diagnostics);state['metadata']=dict(vix_result)
   Path('rolling_state.json').write_text(json.dumps(state,indent=2))
+  Path('rolling_quote_diagnostics.json').write_text(json.dumps({'asof':at,'resets':dict(reset_diagnostics),'metadata':dict(vix_result)},indent=2))
+  for _,row in summaries:
+   if metadata_notes:row[9]+='; '+'; '.join(metadata_notes)
   updates=[]
   for name,row in summaries:updates.append({'range':f"'{name}'!A{row_numbers[name]}",'values':[row]})
   for name,allrows in logsets:
@@ -111,7 +125,7 @@ def main():
   if not cached or mono-cached['at']>30:return None,{},{}
   d=cached['data'];rows=d['optionsChain'];spot=next((x.get('ltp') for x in rows if x.get('option_type') not in ['CE','PE']),None)
   if not good(spot) or spot<=0:return None,{},{}
-  strike=int((spot+25)//50)*50;pair={'at':cached['at'],'spot':spot,'strike':strike};gs={};qs={}
+  strike=int((spot+25)//50)*50;pair={'at':cached['at'],'spot':spot,'strike':strike};gs={};qs={sym:p for sym,(p,received) in prices.items() if 0<=mono-received<=10}
   for x in rows:
    sym=x.get('symbol');delta=x.get('greeks',{}).get('delta')
    if good(delta):gs[sym]=delta
@@ -126,6 +140,14 @@ def main():
  unique=sorted(set(expiry_map.values()));which=0;next_chain=0;next_save=0;last_monotonic=time.monotonic();final=False
  while True:
   t=now();clock=t.time();mono=time.monotonic()
+  if not vix_started and clock>=dt_time(9,30):
+   vix_started=True;threading.Thread(target=fetch_vix,daemon=True).start()
+  if vix_result and not metadata_notes:
+   with lock:
+    if 'value' in vix_result:
+     for study in studies:study.vix=vix_result['value']
+     metadata_notes.append('VIX retrieved '+vix_result['at']+'; response-time snapshot, not guaranteed exact entry')
+    else:metadata_notes.append('VIX unavailable at '+vix_result['at']+'; '+vix_result['error'])
   if mono-last_monotonic>15 and clock>=dt_time(9,30):
    for study in studies:study.issue('Collector processing gap >15 seconds')
   last_monotonic=mono
@@ -161,6 +183,35 @@ def main():
     if clock>=dt_time(9,30):
      for study in studies:
       if study.expiry==expiry:study.issue('Chain snapshot unavailable')
+  # After the post-slot chain selects ATM, obtain both entry contracts and
+  # every surviving outgoing leg in one bounded request when ticks are absent.
+  # Network IO remains outside the callback lock; the engine still enforces
+  # the original 30-second reset deadline and max-three-entry rules.
+  slot=next((x for x in ('11:20:00','13:10:00') if x<=t.strftime('%H:%M:%S')<=x[:6]+'30'),None)
+  if slot:
+   for expiry in unique:
+    key=day+'|'+expiry+'|'+slot
+    with lock:
+     targets=[s for s in studies if s.family=='Time Based' and s.expiry==expiry and any(sc.active and slot not in sc.handled_slots for sc in s.scenarios.values())]
+     pair,_,qs=pair_for(expiry,time.monotonic());cached=chains.get(expiry,{})
+     needed=({pair[s]['symbol'] for s in ('CE','PE')} if pair else set())|{l.symbol for s in targets for sc in s.scenarios.values() if sc.active for l in sc.active.open_legs()}
+     missing=sorted(needed-set(qs))
+    if not targets:continue
+    reason='POST-SLOT CHAIN PENDING' if not pair or cached.get('requested','')[11:19]<slot else 'FRESH QUOTES MISSING: '+','.join(missing) if missing else 'READY'
+    reset_diagnostics[key]={'at':now().isoformat(),'readiness':reason}
+    if reason.startswith('FRESH QUOTES MISSING') and time.monotonic()-reset_attempts.get(key,-1e10)>=7:
+     reset_attempts[key]=time.monotonic()
+     def reset_quotes(key=key,needed=sorted(needed),missing=missing):
+      try:
+       response=call('quotes',{'symbols':','.join(needed)});fresh=quote_prices(response,needed);received=now().isoformat()
+       with lock:
+        for symbol,price in fresh.items():
+         prices[symbol]=(price,time.monotonic())
+         for study in studies:study.tick(symbol,price,received)
+        reset_diagnostics[key]={'at':received,'readiness':'REST RESPONSE RECEIVED; engine deadline still applies','symbols':needed}
+      except Exception as error:
+       with lock:reset_diagnostics[key]={'at':now().isoformat(),'readiness':'REST FALLBACK FAILED','error':type(error).__name__,'missing':missing}
+     threading.Thread(target=reset_quotes,daemon=True).start()
   with lock:
    for study in studies:
     pair,gs,qs=pair_for(study.expiry,time.monotonic())
@@ -187,5 +238,7 @@ def main():
   time.sleep(.5)
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
+
 
 
