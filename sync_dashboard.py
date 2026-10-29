@@ -63,7 +63,15 @@ def main():
             raise RuntimeError("Monthly Expiry sheet unavailable")
         send("Monthly Expiry", monthly.json()["values"], token)
 
-
+        # Rolling summaries and cycle logs must refresh with the same button/job.
+        for family in ("Time Based", "Delta Based"):
+            for choice in ("Current Week", "Next Week", "Monthly"):
+                for suffix, last_col, rows in (("", "AK", 1000), (" Logs", "AC", 5000)):
+                    tab = f"{family} - {choice}{suffix}"
+                    response = read_values(session, f"'{tab}'!A1:{last_col}{rows}")
+                    if response.status_code != 200 or not response.json().get("values"):
+                        raise RuntimeError(f"Rolling sheet unavailable: {tab}")
+                    send(tab, response.json()["values"], token)
 
     except Exception as exc:
         sys.exit(f"Sync failed ({type(exc).__name__}); no credentials or sheet data logged.")
