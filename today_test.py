@@ -212,18 +212,8 @@ def call_fyers(method, payload):
 
 
 def market_timestamp(value):
-    """Convert FYERS quote 'tt' epoch seconds/milliseconds to India time."""
-    if value in (None, ""):
-        return None
-    try:
-        epoch = float(value)
-        if epoch <= 0:
-            return None
-        if epoch > 10_000_000_000:
-            epoch /= 1000
-        return datetime.fromtimestamp(epoch, IST)
-    except (TypeError, ValueError, OSError, OverflowError):
-        return None
+    from quote_quality import trade_timestamp
+    return trade_timestamp(value)
 
 
 def get_optionchain_spot_quote():
@@ -328,13 +318,17 @@ def classify_gap(opening, previous_close):
 def poll_previous_history():
     """Optional context starts after the websocket; never gates premium capture."""
     global previous_started, previous_deadline, previous_ohlc, gap_text, entry_data_status
-    if not previous_started:
+    global previous_attempts, previous_next_retry
+    if not previous_started and previous_attempts < 3 and time_module.monotonic() >= previous_next_retry:
+        previous_attempts += 1
         previous_requests["PREVIOUS"] = start_request(get_previous_day_ohlc, capture_time.date())
         previous_deadline = time_module.monotonic() + 7
         previous_started = True
     results = collect_ready_requests(previous_requests, expired=time_module.monotonic() >= previous_deadline)
     for _, (value, error) in results.items():
         if error is not None:
+            previous_started = False
+            previous_next_retry = time_module.monotonic() + 20
             entry_data_status += "; PREVIOUS SESSION HISTORY UNAVAILABLE"
             print(f"Previous session history unavailable: {type(error).__name__}; premium monitoring continues.", flush=True)
         else:
@@ -586,7 +580,7 @@ def make_daily_row(run_status):
             sl_cell(state["scenarios"][p], "pe", pe_sl_values[index])])
     gap_pct = round((float(day_open) - float(previous_ohlc["close"])) / float(previous_ohlc["close"]) * 100, 4) if day_open not in ("", None) and previous_ohlc["close"] not in ("", None, 0) else ""
     # Preserve original quantities; expose an explicit conversion for this 65-unit study.
-    oi_valid = call_oi >= 0 and put_oi >= 0 and call_oi % CONTRACT_QTY == 0 and put_oi % CONTRACT_QTY == 0 and "unavailable" not in oi_snapshot_status.lower()
+    oi_valid = call_oi >= 0 and put_oi >= 0 and call_oi % CONTRACT_QTY == 0 and put_oi % CONTRACT_QTY == 0 
     values.extend([capture_time.strftime("%A"), gap_pct,
         int(call_oi / CONTRACT_QTY) if oi_valid else "",
         int(put_oi / CONTRACT_QTY) if oi_valid else "",
@@ -876,6 +870,10 @@ def timestamped_metadata(function, *args):
 metadata_requests = {}
 metadata_started = False
 metadata_deadline = float("inf")
+metadata_attempts = 0
+metadata_next_retry = 0
+previous_attempts = 0
+previous_next_retry = 0
 while True:
     enforce_entry_deadline()
     try:
@@ -921,7 +919,7 @@ quote_ages = [
     if stamp is not None
 ]
 entry_data_status = (
-    "FRESH" if len(quote_ages) == 2 and max(quote_ages) <= 10
+    "FRESH" if len(quote_ages) == 2 and min(quote_ages) >= 0 and max(quote_ages) <= 10
     else "CHECK LTP AGE"
 )
 current_atm = nearest_atm(nifty_spot)
@@ -1061,12 +1059,13 @@ def poll_entry_metadata():
     previous_changed = poll_previous_history()
     global india_vix, vix_retrieved_at, vix_snapshot_status
     global call_oi, put_oi, pcr, market_bias, oi_retrieved_at, oi_snapshot_status
-    global metadata_started, metadata_deadline
-    if not metadata_started:
+    global metadata_started, metadata_deadline, metadata_attempts, metadata_next_retry
+    if not metadata_started and metadata_attempts < 3 and time_module.monotonic() >= metadata_next_retry:
+        metadata_attempts += 1
         # Entry premiums and the live socket are already established.
         metadata_requests.update({
-            "VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL]),
-            "OI": start_request(timestamped_metadata, refresh_optionchain_for_oi),
+            **({"VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL])} if india_vix is None and (now_ist() - capture_time).total_seconds() <= 30 else {}),
+            **({"OI": start_request(timestamped_metadata, refresh_optionchain_for_oi)} if oi_snapshot_status != "ENTRY REFRESH" and not oi_snapshot_status.startswith("DELAYED METADATA") else {}),
         })
         metadata_deadline = time_module.monotonic() + 15
         metadata_started = True
@@ -1079,9 +1078,13 @@ def poll_entry_metadata():
                 raise error
             value, retrieved_at = result
             if name == "VIX":
-                india_vix = ltp_from_quote(value[VIX_SYMBOL], "India VIX")
+                vix_value = ltp_from_quote(value[VIX_SYMBOL], "India VIX")
                 vix_retrieved_at = retrieved_at
-                vix_snapshot_status = "ENTRY REFRESH"
+                if (retrieved_at - capture_time).total_seconds() <= 30:
+                    india_vix = vix_value
+                    vix_snapshot_status = "ENTRY REFRESH"
+                else:
+                    vix_snapshot_status = f"UNAVAILABLE AT ENTRY; later value {vix_value} at {fmt_time(retrieved_at)} IST"
             else:
                 if value.get("s") != "ok":
                     raise RuntimeError("OI refresh failed")
@@ -1093,13 +1096,17 @@ def poll_entry_metadata():
                 call_oi, put_oi = new_call, new_put
                 pcr, market_bias = daily_bias(put_oi, call_oi)
                 oi_retrieved_at = retrieved_at
-                oi_snapshot_status = "ENTRY REFRESH"
+                oi_snapshot_status = ("ENTRY REFRESH" if (retrieved_at - capture_time).total_seconds() <= 30 else "DELAYED METADATA; NOT ENTRY SNAPSHOT")
             print(f"{name} snapshot retrieved at {fmt_time(retrieved_at)} IST", flush=True)
         except Exception as exc:
             if name == "VIX":
                 vix_snapshot_status = "UNAVAILABLE"
+                metadata_started = False
+                metadata_next_retry = time_module.monotonic() + 20
             else:
                 oi_snapshot_status = "PRE-ENTRY FALLBACK: entry refresh unavailable"
+                metadata_started = False
+                metadata_next_retry = time_module.monotonic() + 20
             print(f"{name} metadata unavailable: {type(exc).__name__}", flush=True)
     # Entry premiums, entry timestamp, stop thresholds and fills are never changed here.
     return bool(results) or previous_changed
@@ -1183,8 +1190,8 @@ try:
     exit_snapshot_received_at = now_ist()
     final_ce_ltp = ltp_from_quote(closing_snapshot[ce_symbol], "final CE")
     final_pe_ltp = ltp_from_quote(closing_snapshot[pe_symbol], "final PE")
-    final_ce_time = market_timestamp(closing_snapshot[ce_symbol].get("tt"))
-    final_pe_time = market_timestamp(closing_snapshot[pe_symbol].get("tt"))
+    final_ce_time = exit_snapshot_received_at
+    final_pe_time = exit_snapshot_received_at
     print("Final CE/PE exit quote received.", flush=True)
 except Exception as exc:
     print(
@@ -1210,11 +1217,11 @@ with state_lock:
         scenario = state["scenarios"][percent]
         if scenario["ce_exit"] is None:
             scenario["ce_exit"] = final_ce_ltp
-            scenario["ce_exit_time"] = final_ce_time or exit_snapshot_received_at
+            scenario["ce_exit_time"] = exit_snapshot_received_at
             scenario["ce_exit_reason"] = final_reason
         if scenario["pe_exit"] is None:
             scenario["pe_exit"] = final_pe_ltp
-            scenario["pe_exit_time"] = final_pe_time or exit_snapshot_received_at
+            scenario["pe_exit_time"] = exit_snapshot_received_at
             scenario["pe_exit_reason"] = final_reason
     state["complete"] = True
 
@@ -1244,4 +1251,6 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
+
 

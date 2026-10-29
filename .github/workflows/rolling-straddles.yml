@@ -49,7 +49,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-paper.txt
       - name: Verify paper state machine
-        run: python test_rolling.py
+        run: |
+          python test_rolling.py
+          python test_quote_quality.py
       - name: Track six isolated paper challengers
         run: python -u rolling_collector.py
       - name: Preserve observed state for recovery
@@ -57,6 +59,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rolling-paper-state-${{ github.run_id }}
-          path: rolling_state.json
+          path: |
+            rolling_state.json
+            rolling_quote_diagnostics.json
           if-no-files-found: ignore
           retention-days: 30
