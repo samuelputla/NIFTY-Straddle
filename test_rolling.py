@@ -36,3 +36,55 @@ for choice in CHOICES:
  log=next(r for r in s.logs() if r[4]==25 and r[5]==1)
  assert log[23]==-1125 # (-25 CE +10 PE)*65 -150, stopped CE counted once
 print('PASS: all expiry variants track stopped-contract delta, require both Greeks, preserve stopped fills/P&L, reset reference and cap entries')
+
+
+
+from rolling_log_updates import plan_delta_log_updates
+import copy,re
+
+def apply_patches(values,patches):
+ result=copy.deepcopy(values)
+ for patch in patches:
+  n=int(re.search(r'!A(\d+):',patch['range']).group(1))
+  while len(result)<n:result.append([])
+  result[n-1]=copy.deepcopy(patch['values'][0])
+ return result
+
+for choice in CHOICES:
+ s=Study('Delta Based',choice,'2026-11-03','2026-10-29');advance(s,'09:30:00',pair())
+ title=f'Delta Based - {choice} Logs';rows=s.logs();assert len(rows)==9
+ assert all(r[10]==s.scenarios[25].active.reference and r[15]=='' and r[16]=='' and r[23]=='' and r[25]=='' and r[28]=='OPEN CYCLE' for r in rows)
+ assert all(all(isinstance(v,(str,int,float)) for v in row) for row in rows)
+ sheet=apply_patches([LOG_HEADERS],plan_delta_log_updates(title,[LOG_HEADERS],rows))
+ assert len(sheet)==10 and plan_delta_log_updates(title,sheet,rows)==[]
+ s.tick('CE22700',125,at('10:00:00'))
+ partial=next(r for r in s.logs() if r[4]==25)
+ assert partial[15]==125 and partial[16]=='' and partial[23]==''
+ sheet=apply_patches(sheet,plan_delta_log_updates(title,sheet,s.logs()))
+ outgoing_row=next(i for i,r in enumerate(sheet) if r[0].endswith('|25|1'))
+ advance(s,'10:05:00',pair(1,ce=.5,pe=-.5,strike=22900),{'CE22700':.70,'PE22700':-.30})
+ patches=plan_delta_log_updates(title,sheet,s.logs())
+ sheet=apply_patches(sheet,patches)
+ assert len(sheet)==19 and sheet[outgoing_row][0].endswith('|25|1')
+ assert sheet[outgoing_row][15]==125 and sheet[outgoing_row][19]=='SL threshold paper fill'
+ assert abs(sheet[outgoing_row][26]+.40)<1e-10 and abs(sheet[outgoing_row][27]-.38)<1e-10
+ incoming=next(r for r in sheet[1:] if r[0].endswith('|25|2'))
+ assert incoming[10]==0 and incoming[25]==''
+ assert plan_delta_log_updates(title,sheet,s.logs())==[] # retry after successful/uncertain response
+ # Formatted numeric values and trimmed empty cells must not cause duplicate writes.
+ formatted=[[str(v) if isinstance(v,(int,float)) else v for v in r] for r in sheet]
+ assert plan_delta_log_updates(title,formatted,s.logs())==[]
+ advance(s,'15:00:00',pair(2))
+ final=apply_patches(sheet,plan_delta_log_updates(title,sheet,s.logs()))
+ assert len(final)==19 and len({r[0] for r in final[1:]})==18
+ assert all('OPEN CYCLE' not in r[28] for r in final[1:])
+ assert plan_delta_log_updates(title,final,s.logs())==[]
+ for bad in [final+[final[1]], [LOG_HEADERS]]:
+  try:plan_delta_log_updates(title,bad,s.logs()+[s.logs()[0]] if len(bad)==1 else s.logs())
+  except ValueError:pass
+  else:raise AssertionError('Duplicate identity accepted')
+ try:plan_delta_log_updates('Time Based - '+choice+' Logs',[LOG_HEADERS],s.logs())
+ except ValueError:pass
+ else:raise AssertionError('Non-delta target accepted')
+t=Study('Time Based','Current Week','2026-11-03','2026-10-29');advance(t,'09:30:00',pair());assert t.logs()==[]
+print('PASS: open-entry logs, zero reference, partial stop, same-row roll/final updates, retry idempotency, duplicate refusal, all expiry variants, Time Based logging unchanged')
