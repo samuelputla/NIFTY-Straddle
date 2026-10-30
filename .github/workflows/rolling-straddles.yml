@@ -61,6 +61,7 @@ jobs:
         run: |
           python test_rolling.py
           python test_quote_quality.py
+          python test_measurements.py
       - name: Track six isolated paper challengers
         run: python -u rolling_collector.py
       - name: Preserve observed state for recovery
@@ -71,5 +72,7 @@ jobs:
           path: |
             rolling_state.json
             rolling_quote_diagnostics.json
+            delta_observations.jsonl
           if-no-files-found: ignore
           retention-days: 30
+
