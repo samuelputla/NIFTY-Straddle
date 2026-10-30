@@ -56,23 +56,32 @@ def early(cycles,quotes,deadline):
    profit+=round(l['entry']-price,2)*QTY
  return round(profit-count*BASE_COST,2),count*BASE_COST
 
-def target(cycles,quotes,fraction,family):
+def target(cycles,quotes,fraction,family,trace=None):
  total=0;count=0
  for c in cycles:
   if not quotes.path(c,c['end']):raise ValueError('Incomplete target path: quote gap greater than 10 seconds')
-  count+=1;last={l['symbol']:(c['start'],l['entry']) for l in c['legs'].values()}
+  count+=1;last={l['symbol']:(c['start'],l['entry']) for l in c['legs'].values()};stopped={};hit_at=None;hit_marks=None
   points=sum(round(l['entry']-l['exit'],2) for l in c['legs'].values());hit=False
   events=sorted((t,s,p) for s in last for t,p in quotes.by.get(s,[]) if c['start']<=t<=c['end'])
   for at,s,p in events:
    last[s]=(at,p);marks=[]
+   # Fixed collectors timestamp the journal just before the stop callback.
+   # A crossing quote must realize the stop first, even if its saved stop time is microseconds later.
    for l in c['legs'].values():
-    if l['time']<=at:marks.append(l['exit'])
+    is_stop='SL' in l['reason'].upper() or 'STOP' in l['reason'].upper()
+    threshold=round(l['entry']*(1+c['pct']/100),2)
+    if is_stop and (l['time']<=at or l['symbol']==s and p>=threshold):stopped[l['symbol']]=l['exit']
+    elif not is_stop and l['symbol']==s and at<c['end'] and p>=threshold:raise ValueError('Observed stop crossing conflicts with saved baseline; target replay unavailable')
+   for l in c['legs'].values():
+    if l['symbol'] in stopped:marks.append(stopped[l['symbol']])
+    elif l['time']<=at:marks.append(l['exit'])
     elif at-last[l['symbol']][0]<=10:marks.append(last[l['symbol']][1])
     else:break
    if len(marks)!=2:continue
    gross=sum(l['entry']-price for l,price in zip(c['legs'].values(),marks))
-   if gross+1e-9>=fraction*sum(l['entry'] for l in c['legs'].values()):points=gross;hit=True;break
+   if gross+1e-9>=fraction*sum(l['entry'] for l in c['legs'].values()):points=gross;hit=True;hit_at=at;hit_marks=marks;break
   total+=points*QTY
+  if trace is not None:trace.append({'cycle':c['number'],'target_fraction':fraction,'hit':hit,'hit_at':datetime.fromtimestamp(hit_at,__import__('zoneinfo').ZoneInfo('Asia/Kolkata')).isoformat() if hit_at is not None else None,'marked_exit_prices':hit_marks,'stopped_fills':dict(stopped),'gross_points':points})
   # Time Based may enter at its next fixed reset; a target-flat Delta study cannot re-enter.
   if hit and family!='Time Based':break
  return round(total-count*BASE_COST,2),count*BASE_COST
@@ -113,19 +122,19 @@ def gate(variant,context):
  if variant=='FILTER_EVENT':v=context.get('event_day');return None if v not in (True,False) else not v
  return True
 
-def compare_day(day,family,choice,pct,raw_cycles,quotes,chains,context,phase='CALIBRATION',url=''):
+def compare_day(day,family,choice,pct,raw_cycles,quotes,chains,context,phase='CALIBRATION',url='',evidence=None):
  try:cycles=prepare(day,raw_cycles);baseline=net(cycles);cost=len(cycles)*BASE_COST
  except (ValueError,KeyError,TypeError):cycles=[];baseline=None;cost=None
  expiry=cycles[0]['expiry'] if cycles else '';dte=(date.fromisoformat(expiry)-date.fromisoformat(day)).days if expiry else ''
  out=[]
  for variant in VARIANTS:
-  value=None;fees=None;risk='';status='COMPLETE';decision='';note='Sampled paper comparison; baseline fills unchanged'
+  trace=[];value=None;fees=None;risk='';status='COMPLETE';decision='';note='Sampled paper comparison; baseline fills unchanged'
   if baseline is None:status='UNAVAILABLE';note='Baseline incomplete'
   else:
    try:
     if variant=='BASELINE':value,fees=baseline,cost
     elif variant.startswith('EXIT_'):value,fees=early(cycles,quotes,ts(day,variant[5:7]+':'+variant[7:9]+':00'))
-    elif variant.startswith('TARGET_'):value,fees=target(cycles,quotes,int(variant.split('_')[1])/100,family);note='Sampled target path (<=10s gaps); stop priority; Time resets continue; target-flat Delta stops for day'
+    elif variant.startswith('TARGET_'):value,fees=target(cycles,quotes,int(variant.split('_')[1])/100,family,trace);note='Sampled target path (<=10s gaps); stop priority; Time resets continue; target-flat Delta stops for day'
     elif variant.startswith('WINGS_'):value,fees,risk=hedged(cycles,chains,int(variant.split('_')[1]));status='INDICATIVE';note='Baseline short fills plus pre-event wing ask entry/bid exit <=30s; size unverified; not broker margin; initial static expiry loss only, not rolled daily loss limit'
     else:
      passed=gate(variant,context)
@@ -133,6 +142,7 @@ def compare_day(day,family,choice,pct,raw_cycles,quotes,chains,context,phase='CA
      decision='TRADE' if passed else 'SKIP';value,fees=(baseline,cost) if passed else (0,0);status='COMPLETE' if passed else 'SKIPPED'
    except (ValueError,KeyError,TypeError) as e:status='UNAVAILABLE';note=str(e);value=None;fees=None
   diff=round(value-baseline,2) if value is not None and baseline is not None else '';stress=round(value-fees,2) if value is not None and fees is not None else ''
+  if evidence is not None and trace:evidence[f'{VERSION}|{day}|{family}|{choice}|{pct}|{variant}']=trace
   out.append([f'{VERSION}|{day}|{family}|{choice}|{pct}|{variant}',day,family,choice,pct,variant,VERSION,status,baseline if baseline is not None else '',value if value is not None else '',diff,cost if cost is not None else '',fees if fees is not None else '',stress,context.get('regime','Unknown'),context.get('gap_direction','Unknown'),dte,decision,phase,len(cycles),risk,note,url])
  return out
 
