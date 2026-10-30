@@ -7,6 +7,18 @@ def at(t):return D+'T'+t+'+05:30'
 def cy(start='09:30:00',end='15:00:00',number=1):return dict(pct=25,number=number,strike=23000,expiry='2026-11-03',entry_at=at(start),close_at=at(end),legs={s:dict(symbol=s,entry=100,exit=50,exit_at=at(end),reason='15:00 EXIT') for s in ('CE','PE')})
 def quote(t,ce,pe):return [dict(k='q',t=at(t),s=s,p=v) for s,v in [('CE',ce),('PE',pe)]]
 class ComparisonTests(unittest.TestCase):
+ def test_research_retry_and_month_read(self):
+  from comparison_runner import save_research,month_rows
+  class Sheet:
+   row_count=100000
+   def __init__(self):self.rows=[HEADERS]
+   def get(self,r,**kw):
+    import re
+    a,b=map(int,re.findall(r'\d+',r));rows=self.rows[a-1:b];return [[x[0]] for x in rows] if ':' in r and r.split(':')[1].startswith('A') else rows
+   def append_rows(self,rows,**kw):self.rows.extend(rows)
+   def batch_update(self,updates,**kw):
+    for u in updates:self.rows[int(u['range'][1:])-1]=u['values'][0]
+  ws=Sheet();rows=compare_day(D,'Fixed Entry','Current Week',25,[],Quotes([]),[],{});save_research(ws,rows);save_research(ws,rows);self.assertEqual(len(ws.rows),11);self.assertEqual(len(month_rows(ws,'2026-11')),10)
  def test_observer_journal_and_incomplete_capture(self):
   import tempfile,os,gzip,json
   from comparison_capture import Capture
@@ -17,6 +29,7 @@ class ComparisonTests(unittest.TestCase):
     os.chdir(temp);c=Capture(D,'fixed_Current_Week');c.quote(at('09:30:00'),'CE',100);c.close();raw=Path(c.path).read_bytes();source,events=read_capture(raw,D,{'CE'},set());self.assertEqual(source,'fixed_Current_Week');self.assertEqual(len(events),1)
     c=Capture(D,'broken');c.dropped=1;c.close()
     with self.assertRaises(ValueError):read_capture(Path(c.path).read_bytes(),D,{'CE'},set())
+    c=Capture(D,'observer_error');c.chain(at('09:30:00'),'2026-11-03',None);self.assertFalse(c.enabled);c.close()
    finally:os.chdir(old)
  def test_fixed_log_clock_only_and_late_entry(self):
   c=cy();c['entry_at']='09:30:02';c['legs']['CE']['exit_at']='15:00:00';self.assertEqual(len(prepare(D,[c])),1)
