@@ -83,6 +83,7 @@ def publish(rows,contexts,token):
  signer=RSASigner.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']))
  from comparison_snapshot import compact
  months=sorted({str(r[1])[:7] for r in rows if len(r)>7 and str(r[6])==VERSION})
+ index_months=sorted(set(months)|{str(r[1])[:7] for r in contexts if len(r)>2 and r[2]==VERSION})
  session=requests.Session();headers={'Content-Type':'application/json'}
  if token:headers['OAI-Sites-Authorization']='Bearer '+token
  def send(payload):
@@ -92,15 +93,50 @@ def publish(rows,contexts,token):
   payload=compact([r for r in rows if str(r[1]).startswith(month)],month)
   if len(json.dumps(payload).encode())>3800000:raise ValueError('Comparison month snapshot too large; previous snapshot retained')
   send(payload)
- payload={'kind':'index','version':VERSION,'months':months,'start':START,'eligibleDays':sum(str(r[11]).upper()=='TRUE' for r in contexts if len(r)>13 and r[2]==VERSION),'eventScope':RBI_SCOPE,'eventSource':RBI_SOURCE,'updatedAt':dt.datetime.now(IST).isoformat()}
+ payload={'kind':'index','version':VERSION,'months':index_months,'start':START,'eligibleDays':sum(str(r[11]).upper()=='TRUE' for r in contexts if len(r)>13 and r[2]==VERSION),'eventScope':RBI_SCOPE,'eventSource':RBI_SOURCE,'updatedAt':dt.datetime.now(IST).isoformat()}
  send(payload)
+
+def comparison_sheet(book):
+ from gspread.exceptions import WorksheetNotFound
+ try:ws=book.worksheet('Research Comparisons')
+ except WorksheetNotFound:ws=book.add_worksheet('Research Comparisons',rows=100000,cols=len(HEADERS))
+ header=ws.get('A1:W1')
+ if not header or not any(header[0]):ws.update(range_name='A1',values=[HEADERS],value_input_option='RAW')
+ elif header[0]!=HEADERS:raise ValueError('Unexpected research output schema')
+ return ws
+
+def id_positions(ws):
+ rows=ws.get('A2:A'+str(ws.row_count));positions={}
+ for number,row in enumerate(rows,2):
+  if not row or not row[0]:continue
+  if row[0] in positions:raise ValueError('Duplicate research Event ID; no overwrite')
+  positions[row[0]]=number
+ return positions
+
+def save_research(ws,rows):
+ positions=id_positions(ws);updates=[];new=[]
+ for row in rows:
+  if row[0] in positions:updates.append({'range':'A'+str(positions[row[0]]),'values':[row]})
+  else:new.append(row)
+ if new:ws.append_rows(new,value_input_option='RAW')
+ if updates:ws.batch_update(updates,value_input_option='RAW')
+
+def month_rows(ws,month):
+ positions=id_positions(ws);numbers=sorted(n for key,n in positions.items() if key.startswith(VERSION+'|'+month))
+ if not numbers:return []
+ rows=[]
+ for first in range(numbers[0],numbers[-1]+1,5000):
+  chunk=ws.get(f'A{first}:W{min(numbers[-1],first+4999)}',value_render_option='UNFORMATTED_VALUE')
+  rows.extend(r for r in chunk if len(r)>6 and str(r[1]).startswith(month) and r[6]==VERSION)
+ if len(rows)!=len(numbers):raise ValueError('Research month rows do not match managed IDs; snapshot retained')
+ return rows
 
 def main():
  import gspread
  from google.oauth2.service_account import Credentials
  p=argparse.ArgumentParser();p.add_argument('--setup-only',action='store_true');args=p.parse_args();now=dt.datetime.now(IST);day=now.date().isoformat()
  client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets']));client.set_timeout((3,15));book=client.open_by_key(BOOK);writer=EvidenceWriter(book)
- outws,_=writer.sheet('Research Comparisons',HEADERS);contextws,prior_context=writer.sheet('Comparison Market Regimes',CONTEXT_HEADERS)
+ outws=comparison_sheet(book);contextws,prior_context=writer.sheet('Comparison Market Regimes',CONTEXT_HEADERS)
  if args.setup_only:print('Comparison schemas ready; no broker requests or baseline edits');return
  if day<START:print('Comparison collection starts '+START+'; no historical results invented');return
  from market_calendar import session_allowed
@@ -143,11 +179,11 @@ def main():
    if known:entry_vix=max(known,key=lambda e:e['t'])['vix']
   r=compare_day(day,family,choice,pct,cycles,Quotes(events),chains,{**context,'entry_vix':entry_vix},phase,os.environ.get('GITHUB_SERVER_URL','https://github.com')+'/'+REPO+'/actions/runs/'+os.environ.get('GITHUB_RUN_ID','local'))
   rows.extend(r)
- writer.save('Research Comparisons',HEADERS,rows,update=True)
+ save_research(outws,rows)
  c=[VERSION+'|'+day,day,VERSION,context.get('regime','Unknown'),context.get('efficiency',''),context.get('gap_pct',''),context.get('gap_direction','Unknown'),context.get('prior_vix_20',''),context.get('event_day') if context.get('event_day') is not None else '',RBI_SCOPE,RBI_SOURCE,baseline_ok,phase,cohort or '',now.isoformat(),'; '.join(notes)]
  writer.save('Comparison Market Regimes',CONTEXT_HEADERS,[c],update=True)
  Path('comparison_report').mkdir(exist_ok=True);Path('comparison_report/report.json').write_text(json.dumps({'date':day,'version':VERSION,'baselineComplete':baseline_ok,'phase':phase,'captureSources':list(captures),'notes':notes,'rows':rows}),encoding='utf-8')
- publish(outws.get_all_values()[1:],contextws.get_all_values()[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
+ publish(month_rows(outws,day[:7]),contextws.get_all_values()[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
  print(json.dumps({'date':day,'rows':len(rows),'baselineComplete':baseline_ok,'phase':phase,'unavailable':sum(r[7]=='UNAVAILABLE' for r in rows)}))
 if __name__=='__main__':main()
 
