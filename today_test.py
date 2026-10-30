@@ -10,6 +10,8 @@ import threading
 from request_timing import start_request, run_with_timeout, collect_ready_requests
 import time as time_module
 
+from pathlib import Path
+from measurement_log import EvidenceWriter,EXEC_HEADERS,execution_row
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -653,6 +655,7 @@ def handle_sl(leg, ltp):
                 scenario[f"{leg_key}_trigger_ltp"] = ltp
                 scenario[f"{leg_key}_exit_time"] = observed_at
                 scenario[f"{leg_key}_exit_reason"] = "STOP LOSS"
+                execution_measurements.append(execution_row(capture_time.date().isoformat(),'Fixed Entry','Current Week',percent,1,ce_symbol if leg_key=='ce' else pe_symbol,observed_at.isoformat(),stop_price,ltp,stop_price))
                 changed.append(percent)
 
     if changed:
@@ -995,6 +998,9 @@ for scenario in state["scenarios"].values():
 
 state_lock = threading.RLock()
 pending_scenario_updates = set()
+execution_measurements = []
+execution_writer = EvidenceWriter(spreadsheet)
+last_measurement_save = 0
 stop_event = threading.Event()
 ws_holder = {"socket": None}
 if not TEST_MODE:
@@ -1160,7 +1166,20 @@ update_scenario_rows(SL_PERCENTAGES)
 if daily_row_number is not None:
     write_daily_row("RUNNING")
 
+def save_execution_evidence():
+    global last_measurement_save
+    last_measurement_save = time_module.monotonic()
+    with state_lock:
+        rows = list(execution_measurements)
+    try:
+        Path('fixed_execution_measurements.json').write_text(json.dumps({'headers':EXEC_HEADERS,'rows':rows}),encoding='utf-8')
+        execution_writer.save('Execution Measurements', EXEC_HEADERS, rows)
+    except Exception as exc:
+        print('Measurement checkpoint pending:', type(exc).__name__, flush=True)
+
 while not stop_event.wait(timeout=0.5):
+    if time_module.monotonic() - last_measurement_save >= 30:
+        save_execution_evidence()
     changed_opening = poll_day_open()
     changed_metadata = poll_entry_metadata() or changed_opening
     with state_lock:
@@ -1230,6 +1249,7 @@ if daily_row_number is not None:
     write_daily_row("COMPLETED")
 
 print("\n=================================================")
+save_execution_evidence()
 print("FINAL PAPER RESULTS BY STOP-LOSS SCENARIO")
 print("=================================================")
 for percent in SL_PERCENTAGES:
@@ -1251,6 +1271,7 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
 
 
 
