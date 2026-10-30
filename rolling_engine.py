@@ -21,6 +21,7 @@ class Leg:
  exit:float|None=None
  exit_at:str=''
  reason:str=''
+ observed_stop:float|None=None
  def close(self,price,at,reason):
   if self.exit is None:self.exit=price;self.exit_at=at;self.reason=reason
 @dataclass
@@ -34,6 +35,7 @@ class Cycle:
  close_at:str=''
  close_delta:float|None=None
  delta_changed:float|None=None
+ measurement:dict=field(default_factory=dict)
  def open_legs(self):return [l for l in self.legs.values() if l.exit is None]
 @dataclass
 class Scenario:
@@ -66,12 +68,26 @@ class Study:
   for sc in self.scenarios.values():
    if sc.done or not sc.active:continue
    for leg in sc.active.open_legs():
-    if leg.symbol==symbol and price>=leg.stop:leg.close(leg.stop,at,'SL threshold paper fill')
+    if leg.symbol==symbol and price>=leg.stop:
+     leg.observed_stop=price;leg.close(leg.stop,at,'SL threshold paper fill')
  def close(self,sc,quotes,at,reason,delta=None):
   cy=sc.active
   for leg in cy.open_legs():leg.close(quotes[leg.symbol],at,reason)
   cy.close_at=at;cy.close_delta=delta
   cy.delta_changed=abs(delta-cy.reference) if good(delta) and good(cy.reference) else None
+ def observe_delta(self,at,greeks,sample_at):
+  if self.family!='Delta Based':return
+  for sc in self.scenarios.values():
+   cy=sc.active
+   if not cy or cy.close_at or cy.reference is None:continue
+   if not all(l.symbol in greeks and good(greeks[l.symbol]) and -1<=greeks[l.symbol]<=1 for l in cy.legs.values()):continue
+   m=cy.measurement
+   if m.get('at')==sample_at:continue
+   ce,pe=(greeks[cy.legs[x].symbol] for x in ('CE','PE'));net=-ce-pe;change=abs(net-cy.reference)
+   from datetime import datetime
+   gap=max(0,(datetime.fromisoformat(sample_at)-datetime.fromisoformat(m.get('at',cy.entry_at))).total_seconds())
+   m.update(at=sample_at,ce=ce,pe=pe,net=net,change=change,min=min(m.get('min',net),net),max=max(m.get('max',net),net),max_change=max(m.get('max_change',0),change),count=m.get('count',0)+1,gap=max(m.get('gap',0),gap))
+   if change>DELTA_TRIGGER+1e-12 and not m.get('cross_at'):m.update(cross_at=sample_at,cross_net=net,cross_change=change)
  def advance(self,at,pair,quotes,greeks,now):
   clock=at[11:19]
   for sc in self.scenarios.values():
@@ -79,7 +95,7 @@ class Study:
    if clock>='15:00:00':
     if sc.active and sc.active.open_legs():
      if not all(l.symbol in quotes for l in sc.active.open_legs()):self.issue('Missing final quote; unresolved position');continue
-     self.close(sc,quotes,at,'15:00 EXIT')
+     self.close(sc,quotes,at,'15:00 EXIT',sc.active.measurement.get('net'))
     elif sc.active and not sc.active.close_at:sc.active.close_at=at
     sc.done=True;continue
    if not sc.active:
@@ -127,4 +143,5 @@ class Study:
     if not c.close_at:status.insert(0,'OPEN CYCLE' if c.open_legs() else 'FLAT; awaiting session finalization')
     rows.append([f'{self.day}|{self.family}|{self.choice}|{sc.pct}|{c.number}',self.day,self.family,self.choice,sc.pct,c.number,self.expiry,c.strike,c.entry_at,c.entry_spot,c.reference if c.reference is not None else '',ce.symbol,pe.symbol,ce.entry,pe.entry,ce.exit if ce.exit is not None else '',pe.exit if pe.exit is not None else '',ce.exit_at,pe.exit_at,ce.reason,pe.reason,*points,round(sum(points)*QTY-CYCLE_COST,2) if settled else '',CYCLE_COST,c.close_at,c.close_delta if c.close_delta is not None else '',c.delta_changed if c.delta_changed is not None else '', '; '.join(status)])
   return rows
+
 

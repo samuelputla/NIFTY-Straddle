@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
 from rolling_log_updates import plan_delta_log_updates
 from quote_quality import quote_prices
+from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
 def title(family,choice):return f'{family} - {choice}'
@@ -18,6 +19,7 @@ def main():
  secret=os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON','');token=os.environ.get('FYERS_ACCESS_TOKEN','').strip()
  client=gspread.authorize(Credentials.from_service_account_info(json.loads(secret),scopes=['https://www.googleapis.com/auth/spreadsheets']))
  client.set_timeout((3,8));book=client.open_by_key(BOOK)
+ evidence=EvidenceWriter(book);sample_seen=set();sample_pending=[]
  sheets={};existing={w.title:w for w in book.worksheets()}
  for family in ['Time Based','Delta Based']:
   for choice in CHOICES:
@@ -88,7 +90,17 @@ def main():
    state={'asof':at,'studies':[__import__('dataclasses').asdict(study) for study in studies]}
    summaries=[(title(study.family,study.choice),study.summary(at)) for study in studies]
    logsets=[(title(study.family,study.choice)+' Logs',study.logs()) for study in studies]
+   delta_evidence=delta_rows(studies);execution_evidence=execution_rows(studies)
+   pending_samples=list(sample_pending);sample_pending.clear()
   state['reset_diagnostics']=dict(reset_diagnostics);state['metadata']=dict(vix_result)
+  if pending_samples:
+   with Path('delta_observations.jsonl').open('a',encoding='utf-8') as output:
+    for sample in pending_samples:output.write(json.dumps(sample)+'\n')
+  # Sheet calls stay outside the quote-processing lock; optional evidence failure cannot stop tracking.
+  try:
+   evidence.save('Delta Measurements',DELTA_HEADERS,delta_evidence,update=True)
+   evidence.save('Execution Measurements',EXEC_HEADERS,execution_evidence)
+  except Exception as error:print('Measurement checkpoint pending:',type(error).__name__)
   Path('rolling_state.json').write_text(json.dumps(state,indent=2))
   Path('rolling_quote_diagnostics.json').write_text(json.dumps({'asof':at,'resets':dict(reset_diagnostics),'metadata':dict(vix_result)},indent=2))
   for _,row in summaries:
@@ -223,7 +235,14 @@ def main():
       if study.family=='Delta Based' and any(l.symbol not in gs for sc in study.scenarios.values() if sc.active and sc.active.open_legs() and len(sc.cycles)<3 for l in sc.active.legs.values()):study.issue('Original-pair Greeks missing; delta rolls paused')
       snapshot_clock=chains[study.expiry]['requested'][11:19]
       needs_clock='09:30:00' if not study.initial_at else '13:10:00' if study.family=='Time Based' and now().time()>=dt_time(13,10) else '11:20:00' if study.family=='Time Based' and now().time()>=dt_time(11,20) else '00:00:00'
-      if snapshot_clock>=needs_clock:study.advance(now().isoformat(),pair,qs,gs,time.monotonic())
+      if snapshot_clock>=needs_clock:
+       observed=chains[study.expiry]['requested']
+       study.observe_delta(now().isoformat(),gs,observed)
+       study.advance(now().isoformat(),pair,qs,gs,time.monotonic())
+       study.observe_delta(now().isoformat(),gs,observed)
+       for row in delta_rows([study]):
+        key=(row[0],row[9])
+        if row[9] and key not in sample_seen:sample_seen.add(key);sample_pending.append(dict(zip(DELTA_HEADERS,row)))
     elif clock>dt_time(9,35) and not study.initial_at:study.issue('MISSED ENTRY WINDOW')
    if clock>=dt_time(9,30):
     if not connected.is_set():
@@ -238,6 +257,7 @@ def main():
   time.sleep(.5)
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
 
 
 
