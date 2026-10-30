@@ -7,6 +7,10 @@ def at(t):return D+'T'+t+'+05:30'
 def cy(start='09:30:00',end='15:00:00',number=1):return dict(pct=25,number=number,strike=23000,expiry='2026-11-03',entry_at=at(start),close_at=at(end),legs={s:dict(symbol=s,entry=100,exit=50,exit_at=at(end),reason='15:00 EXIT') for s in ('CE','PE')})
 def quote(t,ce,pe):return [dict(k='q',t=at(t),s=s,p=v) for s,v in [('CE',ce),('PE',pe)]]
 class ComparisonTests(unittest.TestCase):
+ def test_stop_callback_timestamp_drift_and_target_evidence(self):
+  c=cy('09:30:00','09:30:20');c['legs']['CE'].update(exit=125,exit_at=at('09:30:10.000500'),reason='STOP LOSS');c['legs']['PE']['entry']=400;c['legs']['PE']['exit']=100
+  q=Quotes(quote('09:30:00',100,400)+quote('09:30:10',150,100)+quote('09:30:20',50,100));trace=[]
+  value,cost=target(prepare(D,[c]),q,.5,'Fixed Entry',trace);self.assertEqual(value,17725);self.assertTrue(trace[0]['hit']);self.assertEqual(trace[0]['stopped_fills']['CE'],125)
  def test_research_retry_and_month_read(self):
   from comparison_runner import save_research,month_rows
   class Sheet:
