@@ -22,3 +22,8 @@ Results: PASSED (available checks consistent, with listed limitations), REVIEW (
 
 To inspect: Actions → Daily Historical Validation → latest run → Job summary or daily-validation artifact. For one-off historical verification, audit_date accepts a past session date. It never starts positions. No manual trigger is required for the saved daily schedules.
 
+
+## Isolated comparison research
+
+From 2 November 2026, the existing fixed/rolling collectors optionally journal their existing observations without extra live API requests/subscriptions. A separate job in the existing 16:07 validation workflow reads the artifacts and reconciled baseline rows, writes only Research Comparisons and Comparison Market Regimes, then publishes the Comparisons dashboard tab. No fourth manual start is required. Explicit past-date audit runs do not publish current-day research. See RESEARCH_COMPARISONS.md for frozen variants, RBI event scope, no-look-ahead gates, evidence gaps and the 60+30 session evaluation plan. Merge/activate the reviewed collector PR before expecting forward data.
+
