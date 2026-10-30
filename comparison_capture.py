@@ -35,7 +35,7 @@ class Capture:
      if row is None:break
      f.write(json.dumps(row,separators=(',',':'))+'\n');self.count+=1
      if self.count%1000==0:f.flush()
-     if self.path.stat().st_size>200*1024*1024:raise RuntimeError('Observer storage limit reached')
+     if self.path.stat().st_size>25*1024*1024:raise RuntimeError('Observer storage limit reached')
   except Exception as e:self.failed=type(e).__name__;self.enabled=False
  def close(self):
   if not self.thread:return

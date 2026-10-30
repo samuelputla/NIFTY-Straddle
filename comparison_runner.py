@@ -1,5 +1,5 @@
 """Post-session comparison publisher; writes only two dedicated research tabs."""
-import argparse,datetime as dt,gzip,io,json,os,time,zipfile
+import argparse,datetime as dt,gzip,io,json,os,time,zipfile,re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import requests
@@ -38,7 +38,7 @@ def download_captures(day,token,short_symbols,wing_keys):
    if run['status']!='completed':continue
    r=session.get(f'https://api.github.com/repos/{REPO}/actions/runs/{run["id"]}/artifacts',params={'per_page':100},timeout=(3,15));check(r)
    for a in r.json()['artifacts']:
-    if not a['name'].startswith(('fixed-execution-','rolling-paper-state-')) or a.get('expired'):continue
+    if not a['name'].startswith(('fixed-execution-','rolling-paper-state-','comparison-capture-')) or a.get('expired'):continue
     if a['size_in_bytes']>250*1024*1024:notes.append('Oversize observer artifact');continue
     r=session.get(f'https://api.github.com/repos/{REPO}/actions/artifacts/{a["id"]}/zip',timeout=(5,90));check(r)
     if len(r.content)>250*1024*1024:raise ValueError('Artifact download limit')
@@ -50,7 +50,8 @@ def download_captures(day,token,short_symbols,wing_keys):
       try:source,events=read_capture(z.read(name),day,short_symbols,wing_keys)
       except (ValueError,OSError) as e:notes.append(str(e));continue
       # Run lists are newest first; never mix two captures for the same collector.
-      if source not in found:found[source]=events
+      if source not in found:
+       found[source]=events;notes.append('Capture '+source+' from https://github.com/'+REPO+'/actions/runs/'+str(run['id'])+' artifact '+str(a['id']))
  return found,notes
 
 def history(symbol,day,resolution,start=None):
@@ -150,6 +151,7 @@ def main():
   if t in FIXED and data and 'Run Type' in data[0]:
    runidx=data[0].index('Run Type');data=[data[0]]+[r for r in data[1:] if len(r)>runidx and r[runidx]=='SCHEDULED PAPER']
   raw=cycles_for(t,data,day);summary=[r for r in records(response[i+9].get('values',[])) if r.get('Date')==day];ready=len(summary)==1 and str(summary[0].get('Run Status' if t in FIXED else 'Status','')).upper()=='COMPLETED'
+  if summary and re.search(r'reconstruct|backfill|user-supplied|1m OHLC|CHECK EXIT TICK AGE',str(summary[0].get('Entry Data Status',''))+' '+str(summary[0].get('Data Status','')),re.I):ready=False
   entry_vix=summary[0].get('Vix at 09:30 AM' if t in FIXED else 'India VIX') if summary else None
   try:entry_vix=float(entry_vix)
   except (ValueError,TypeError):entry_vix=None
@@ -168,7 +170,7 @@ def main():
  previous=[r for r in prior_context[1:] if r and len(r)>13 and r[1]<day and r[2]==VERSION and str(r[11]).upper()=='TRUE'];existing=[r for r in prior_context[1:] if r and len(r)>13 and r[1]==day and r[2]==VERSION];cohort=len({r[1] for r in previous})+1 if baseline_ok else None
  phase=phase_for(cohort)
  if existing and existing[0][13]:cohort=int(existing[0][13]);phase=existing[0][12]
- rows=[];chains=[e for e in captures.get('rolling',[]) if e.get('k')=='chain']
+ rows=[];evidence={};chains=[e for e in captures.get('rolling',[]) if e.get('k')=='chain']
  for family,choice,pct,cycles,entry_vix in cases:
   key='fixed_'+choice.replace(' ','_') if family=='Fixed Entry' else 'rolling';events=captures.get(key,[])
   # A response retrieved after entry must never become an entry-time gate.
@@ -177,12 +179,12 @@ def main():
    from comparison_engine import ts
    entry_at=min(ts(day,c['entry_at']) for c in cycles);known=[e for e in chains if finite(e.get('vix')) and 0<=entry_at-dt.datetime.fromisoformat(e['t']).timestamp()<=30]
    if known:entry_vix=max(known,key=lambda e:e['t'])['vix']
-  r=compare_day(day,family,choice,pct,cycles,Quotes(events),chains,{**context,'entry_vix':entry_vix},phase,os.environ.get('GITHUB_SERVER_URL','https://github.com')+'/'+REPO+'/actions/runs/'+os.environ.get('GITHUB_RUN_ID','local'))
+  r=compare_day(day,family,choice,pct,cycles,Quotes(events),chains,{**context,'entry_vix':entry_vix},phase,os.environ.get('GITHUB_SERVER_URL','https://github.com')+'/'+REPO+'/actions/runs/'+os.environ.get('GITHUB_RUN_ID','local'),evidence=evidence)
   rows.extend(r)
  save_research(outws,rows)
  c=[VERSION+'|'+day,day,VERSION,context.get('regime','Unknown'),context.get('efficiency',''),context.get('gap_pct',''),context.get('gap_direction','Unknown'),context.get('prior_vix_20',''),context.get('event_day') if context.get('event_day') is not None else '',RBI_SCOPE,RBI_SOURCE,baseline_ok,phase,cohort or '',now.isoformat(),'; '.join(notes)]
  writer.save('Comparison Market Regimes',CONTEXT_HEADERS,[c],update=True)
- Path('comparison_report').mkdir(exist_ok=True);Path('comparison_report/report.json').write_text(json.dumps({'date':day,'version':VERSION,'baselineComplete':baseline_ok,'phase':phase,'captureSources':list(captures),'notes':notes,'rows':rows}),encoding='utf-8')
+ Path('comparison_report').mkdir(exist_ok=True);Path('comparison_report/report.json').write_text(json.dumps({'date':day,'version':VERSION,'baselineComplete':baseline_ok,'phase':phase,'captureSources':list(captures),'notes':notes,'rows':rows,'comparisonEvidence':evidence}),encoding='utf-8')
  publish(month_rows(outws,day[:7]),contextws.get_all_values()[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
  print(json.dumps({'date':day,'rows':len(rows),'baselineComplete':baseline_ok,'phase':phase,'unavailable':sum(r[7]=='UNAVAILABLE' for r in rows)}))
 if __name__=='__main__':main()

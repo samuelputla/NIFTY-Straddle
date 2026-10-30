@@ -119,10 +119,17 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fixed-execution-${{ matrix.script }}-${{ github.run_id }}
-          path: |
-            fixed_execution_measurements.json
-            comparison_capture_*.jsonl.gz
+          path: fixed_execution_measurements.json
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 30
 
+
+      - name: Preserve isolated comparison quotes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-capture-${{ matrix.script }}-${{ github.run_id }}
+          path: comparison_capture_*.jsonl.gz
+          if-no-files-found: ignore
+          retention-days: 7
 

@@ -26,9 +26,9 @@ Use existing threshold-paper short fills and INR150 per two-leg cycle. Four-leg 
 ## Storage, automation and permissions
 
 - Only Research Comparisons and Comparison Market Regimes tabs are written. Core nine tabs/logs are read only by the comparison runner.
-- Existing fixed/rolling workflows retain the same entry/exit processes. Optional observer journals reuse current ticks and full chain responses, with a 200MB compressed cap and a bounded queue.
+- Existing fixed/rolling workflows retain the same entry/exit processes. Optional observer journals reuse current ticks and full chain responses, with a 25MB compressed cap and a bounded queue.
 - The existing 16:07 IST validation workflow runs a separate comparison job after its read-only audit, including if that audit reports a failure. An explicit past-date audit does not run the comparison publisher. No additional daily manual workflow is required. Before the start date only schemas/empty readiness state exist.
-- GitHub action artifacts preserve capture journals and comparison reports for 90 days, subject to repository retention policy. Download/archive them for longer storage. Partial or test journals are rejected.
+- Raw comparison quote journals are retained for 7 days to bound storage growth; original state/evidence retention remains 30 days. Comparison reports, including target decision times and stop/mark details, are retained for 90 days, subject to repository policy. Research Sheet results persist. Download/archive raw journals within 7 days if long-term tick replay is required. Storage allowance is shared with other repository activity. Partial or test journals are rejected.
 - Post-session context uses three normal FYERS history requests (NIFTY minute, NIFTY daily, VIX daily), spaced apart. No expired-history endpoints or history quota resets. Authentication/data failures yield unavailable inputs.
 - Month snapshots are compacted without dropping rows and signed with the already-configured Sheet service account. Public dashboard writes require a valid RSA signature and a fresh timestamp. Private keys never leave backend configuration or enter the browser.
 - The verified NSE session calendar still needs the official 2027 update when published. Do not invent holidays to extend collection.
