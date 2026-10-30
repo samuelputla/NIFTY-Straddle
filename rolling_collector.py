@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
 from rolling_log_updates import plan_delta_log_updates
 from quote_quality import quote_prices
+from comparison_capture import Capture
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
@@ -59,6 +60,7 @@ def main():
  month=min(monthly)
  if month not in available:raise RuntimeError('Monthly expiry not cross-verified')
  expiry_map=dict(zip(CHOICES,[available[0],available[1],month]));studies=[Study(f,c,expiry_map[c],day) for f in ['Time Based','Delta Based'] for c in CHOICES]
+ comparison_capture=Capture(day,'rolling')
  lock=threading.RLock();prices={};chains={};subscriptions=set();connected=threading.Event();ever_connected=False;disconnected=None
  metadata_notes=[];vix_result={};vix_started=False;reset_diagnostics={};reset_attempts={}
  def fetch_vix():
@@ -74,7 +76,7 @@ def main():
   symbol=message.get('symbol');price=message.get('ltp')
   if symbol and good(price) and price>0:
    with lock:
-    stamp=now().isoformat();prices[symbol]=(price,time.monotonic())
+    stamp=now().isoformat();comparison_capture.quote(stamp,symbol,price);prices[symbol]=(price,time.monotonic())
     if '09:30:00'<=stamp[11:19]<'15:00:00':
      for study in studies:study.tick(symbol,price,stamp)
  def on_connect():connected.set()
@@ -189,7 +191,7 @@ def main():
   if mono>=next_chain:
    expiry=unique[which%len(unique)];which+=1;next_chain=mono+5
    try:
-    requested=now().isoformat();d=call('optionchain',dict(symbol=INDEX,strikecount=50,timestamp=listed[expiry],greeks='1'))['data'];chains[expiry]={'at':time.monotonic(),'data':d,'requested':requested}
+    requested=now().isoformat();d=call('optionchain',dict(symbol=INDEX,strikecount=50,timestamp=listed[expiry],greeks='1'))['data'];chains[expiry]={'at':time.monotonic(),'data':d,'requested':requested};comparison_capture.chain(now().isoformat(),expiry,d)
    except Exception as error:
     print('Chain request unavailable:',type(error).__name__)
     if clock>=dt_time(9,30):
@@ -255,8 +257,10 @@ def main():
     save_thread=threading.Thread(target=save_background,daemon=True);save_thread.start()
    next_save=mono+30
   time.sleep(.5)
+ comparison_capture.close()
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
 
 
 
