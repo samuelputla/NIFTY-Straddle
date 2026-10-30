@@ -15,22 +15,31 @@ concurrency:
 
 jobs:
   wait-for-research-session:
+    outputs:
+      allowed: ${{ steps.window.outputs.allowed }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Wait for 09:12 IST preparation window
+        id: window
         run: |
           python3 - <<'PY'
           from datetime import datetime, time
           from zoneinfo import ZoneInfo
           import time as clock
+          import os
           tz = ZoneInfo('Asia/Kolkata')
           target = datetime.combine(datetime.now(tz).date(), time(9, 12), tzinfo=tz)
           while datetime.now(tz) < target:
               clock.sleep(min(10, max(.1, (target-datetime.now(tz)).total_seconds())))
+          allowed = datetime.now(tz).time() < time(9,35)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("allowed=" + ("true" if allowed else "false") + "\n")
+          if not allowed: print("Late scheduled start skipped; no new collector or position")
           PY
 
   capture:
+    if: ${{ needs.wait-for-research-session.outputs.allowed == 'true' }}
     needs: wait-for-research-session
     runs-on: ubuntu-latest
     timeout-minutes: 355
