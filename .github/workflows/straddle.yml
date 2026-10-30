@@ -113,3 +113,13 @@ jobs:
         run: python -u sync_dashboard.py
 
 
+
+      - name: Preserve additive execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixed-execution-${{ matrix.script }}-${{ github.run_id }}
+          path: fixed_execution_measurements.json
+          if-no-files-found: ignore
+          retention-days: 30
+
