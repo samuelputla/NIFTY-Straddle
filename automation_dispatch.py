@@ -77,6 +77,16 @@ def main():
  api=GitHub(os.environ['GH_TOKEN'])
  if kind=='healthcheck':
   results=[{'workflow':w,'visible_runs':len(api.runs(w))} for w in WORKFLOWS]
+  # Exercise the exact unattended GITHUB_TOKEN dispatch capability against
+  # this workflow's inert probe job, never a running collector.
+  known={r['id'] for r in api.runs('automation-dispatch.yml')}
+  api.dispatch('automation-dispatch.yml',{'probe':'true'})
+  for attempt in range(6):
+   new=[r for r in api.runs('automation-dispatch.yml') if r['id'] not in known and r.get('event')=='workflow_dispatch']
+   if new:
+    probe=max(new,key=lambda r:r['id']);results.append({'workflow':'permission-probe','status':'DISPATCH VERIFIED','run_id':probe['id'],'run_status':probe['status'],'url':probe['html_url']});break
+   time.sleep(2)
+  else:results.append({'workflow':'permission-probe','status':'REVIEW','reason':'Probe dispatch accepted but no new run ID visible'})
  elif kind=='audit':results=[safe_dispatch(api,'eod-validation.yml',{},day,lambda _:False,kind='audit')]
  else:
   import gspread
