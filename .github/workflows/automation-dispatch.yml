@@ -1,5 +1,11 @@
 name: Automatic Session Control
 on:
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: Verify automatic dispatch permissions only; no collectors or market requests
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths: ['.automation/request.json']
@@ -10,7 +16,13 @@ concurrency:
   group: automatic-paper-session-control
   cancel-in-progress: false
 jobs:
+  permission-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Automatic dispatch permission verified. No Sheet changes or market requests."
   control:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 6
     env:
