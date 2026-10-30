@@ -1,0 +1,10 @@
+purpose: Validate the new isolated comparison publisher, not broker execution.
+contract: Month snapshots and index are RSA-signed over exact UTF-8 body with a fresh timestamp.
+verified:
+  - Production compression and signing code sent real HTTP requests to the Postman fixture.
+  - Month and index persisted with valid signatures.
+  - Synthetic 503 prevented success and retained the prior index.
+limitations:
+  - This fixture does not establish FYERS quote availability, Google Sheet access or production publication.
+  - Synthetic keys and unavailable test rows only; no user credentials or fabricated market results.
+
