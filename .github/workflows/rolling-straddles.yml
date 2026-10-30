@@ -73,6 +73,8 @@ jobs:
             rolling_state.json
             rolling_quote_diagnostics.json
             delta_observations.jsonl
+            comparison_capture_*.jsonl.gz
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 90
+
 

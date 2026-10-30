@@ -11,6 +11,7 @@ from request_timing import start_request, run_with_timeout, collect_ready_reques
 import time as time_module
 
 from pathlib import Path
+from comparison_capture import Capture
 from measurement_log import EvidenceWriter,EXEC_HEADERS,execution_row
 import gspread
 from google.oauth2.service_account import Credentials
@@ -673,6 +674,7 @@ def on_message(message):
         ltp = float(raw_ltp)
     except (TypeError, ValueError):
         return
+    comparison_capture.quote(now_ist().isoformat(), symbol, ltp)
     if symbol == ce_symbol:
         handle_sl("CE", ltp)
     elif symbol == pe_symbol:
@@ -998,6 +1000,7 @@ for scenario in state["scenarios"].values():
 
 state_lock = threading.RLock()
 pending_scenario_updates = set()
+comparison_capture = Capture(capture_time.date().isoformat(), 'fixed_Current_Week', enabled=not TEST_MODE)
 execution_measurements = []
 execution_writer = EvidenceWriter(spreadsheet)
 last_measurement_save = 0
@@ -1228,6 +1231,8 @@ except Exception as exc:
     if any((target_end - stamp).total_seconds() > 10 for stamp in (final_ce_time, final_pe_time)):
         entry_data_status += "; CHECK EXIT TICK AGE"
 
+comparison_capture.quote(exit_snapshot_received_at.isoformat(),ce_symbol,final_ce_ltp)
+comparison_capture.quote(exit_snapshot_received_at.isoformat(),pe_symbol,final_pe_ltp)
 state["final_ce_ltp"] = final_ce_ltp
 state["final_pe_ltp"] = final_pe_ltp
 final_reason = "TEST END" if TEST_MODE else "15:00 EXIT"
@@ -1250,6 +1255,7 @@ if daily_row_number is not None:
 
 print("\n=================================================")
 save_execution_evidence()
+comparison_capture.close()
 print("FINAL PAPER RESULTS BY STOP-LOSS SCENARIO")
 print("=================================================")
 for percent in SL_PERCENTAGES:
@@ -1271,6 +1277,7 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
+
 
 
 
