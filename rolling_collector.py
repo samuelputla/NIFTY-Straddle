@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime,time as dt_time
 from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
-from rolling_log_updates import plan_delta_log_updates
+from sheets_resilience import ResilientHTTPClient,RollingSheetStore
 from quote_quality import quote_prices
 from comparison_capture import Capture
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
@@ -18,26 +18,22 @@ def main():
  from fyers_apiv3.FyersWebsocket import data_ws
  from request_timing import run_with_timeout
  secret=os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON','');token=os.environ.get('FYERS_ACCESS_TOKEN','').strip()
- client=gspread.authorize(Credentials.from_service_account_info(json.loads(secret),scopes=['https://www.googleapis.com/auth/spreadsheets']))
+ client=gspread.authorize(Credentials.from_service_account_info(json.loads(secret),scopes=['https://www.googleapis.com/auth/spreadsheets']),http_client=ResilientHTTPClient)
  client.set_timeout((3,8));book=client.open_by_key(BOOK)
  evidence=EvidenceWriter(book);sample_seen=set();sample_pending=[]
- sheets={};existing={w.title:w for w in book.worksheets()}
+ sheets={};schemas={};existing={w.title:w for w in book.worksheets()}
  for family in ['Time Based','Delta Based']:
   for choice in CHOICES:
    name=title(family,choice)
    for name,headers in [(name,SUMMARY_HEADERS),(name+' Logs',LOG_HEADERS)]:
-    ws=existing.get(name) or book.add_worksheet(name,rows=2000,cols=len(headers));values=ws.get_all_values()
-    if not values:ws.update(range_name='A1',values=[headers],value_input_option='RAW')
-    elif values[0]!=headers:raise RuntimeError('Unexpected schema: '+name)
-    sheets[name]=ws
+    sheets[name]=existing.get(name) or book.add_worksheet(name,rows=2000,cols=len(headers));schemas[name]=headers
+ store=RollingSheetStore(book,schemas)
  if os.environ.get('SETUP_ONLY')=='true':print('Six challenger tabs and logs verified; no market requests');return
  if not os.environ.get('GITHUB_RUN_ID'):raise RuntimeError('Normal tracking runs only through the concurrency-protected GitHub workflow')
  day=now().date().isoformat()
  if day<START_DATE or now().weekday()>4 or day in {'2026-11-10','2026-11-24','2026-12-25'}:print('No configured normal session');return
  if now().year!=2026:raise RuntimeError('Update official holiday calendar before a new year')
- for family in ['Time Based','Delta Based']:
-  for choice in CHOICES:
-   if any(r and r[0]==day for r in sheets[title(family,choice)].get_all_values()[1:]):raise RuntimeError('Existing challenger session; duplicate refused. Inspect saved state before recovery.')
+ store.check_day(day)
  args=dict(client_id='M2DACFCYUO-100',token=token,log_path='')
  def call(method,payload):
   result=run_with_timeout(lambda:getattr(fyersModel.FyersModel(**args),method)() if method=='get_profile' else getattr(fyersModel.FyersModel(**args),method)(payload),6)
@@ -83,9 +79,6 @@ def main():
  def on_close(message):connected.clear()
  socket=data_ws.FyersDataSocket(access_token='M2DACFCYUO-100:'+token,log_path='',litemode=True,write_to_file=False,reconnect=True,on_connect=on_connect,on_close=on_close,on_error=lambda m:print('Socket warning; inspect coverage'),on_message=on_message)
  threading.Thread(target=socket.connect,daemon=True).start()
- seen={name:{r[0] for r in ws.get_all_values()[1:] if r} for name,ws in sheets.items() if name.endswith(' Logs')};row_numbers={}
- for study in studies:
-  name=title(study.family,study.choice);row_numbers[name]=len(sheets[name].get_all_values())+1
  def persist():
   at=now().isoformat()
   with lock:
@@ -98,36 +91,24 @@ def main():
   if pending_samples:
    with Path('delta_observations.jsonl').open('a',encoding='utf-8') as output:
     for sample in pending_samples:output.write(json.dumps(sample)+'\n')
-  # Sheet calls stay outside the quote-processing lock; optional evidence failure cannot stop tracking.
+  # Save recoverable market state before any optional network IO.
+  Path('rolling_state.json.tmp').write_text(json.dumps(state,indent=2))
+  Path('rolling_state.json.tmp').replace('rolling_state.json')
+  Path('rolling_quote_diagnostics.json').write_text(json.dumps({'asof':at,'resets':dict(reset_diagnostics),'metadata':dict(vix_result)},indent=2))
+  # Sheet calls remain outside the quote-processing lock.
+  for _,row in summaries:
+   if metadata_notes:row[9]+='; '+'; '.join(metadata_notes)
+  store.checkpoint(summaries,logsets)
   try:
    evidence.save('Delta Measurements',DELTA_HEADERS,delta_evidence,update=True)
    evidence.save('Execution Measurements',EXEC_HEADERS,execution_evidence)
   except Exception as error:print('Measurement checkpoint pending:',type(error).__name__)
-  Path('rolling_state.json').write_text(json.dumps(state,indent=2))
-  Path('rolling_quote_diagnostics.json').write_text(json.dumps({'asof':at,'resets':dict(reset_diagnostics),'metadata':dict(vix_result)},indent=2))
-  for _,row in summaries:
-   if metadata_notes:row[9]+='; '+'; '.join(metadata_notes)
-  updates=[]
-  for name,row in summaries:updates.append({'range':f"'{name}'!A{row_numbers[name]}",'values':[row]})
-  for name,allrows in logsets:
-   if name.startswith('Delta Based - '):
-    # Re-read outside the callback lock. Same-ID updates finalize entry rows,
-    # and a retry after an uncertain write cannot append another copy.
-    existing_rows=sheets[name].get_all_values()
-    updates.extend(plan_delta_log_updates(name,existing_rows,allrows))
-    continue
-   rows=[r for r in allrows if r[0] not in seen[name]]
-   if rows:
-    known={r[0] for r in sheets[name].get_all_values()[1:] if r};rows=[r for r in rows if r[0] not in known]
-    if rows:sheets[name].append_rows(rows,value_input_option='RAW')
-    seen[name]=known|{r[0] for r in rows}
-  book.values_batch_update({'valueInputOption':'RAW','data':updates})
   dashboard=os.environ.get('STRADDLE_DASHBOARD_TOKEN','')
   if dashboard:
    import requests
    for name,_ in summaries:
     for tab in [name,name+' Logs']:
-     payload={'spreadsheetId':BOOK,'sheet':tab,'values':sheets[tab].get_all_values()}
+     payload={'spreadsheetId':BOOK,'sheet':tab,'values':store.snapshot(tab)}
      result=requests.post('https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/sync',json=payload,headers={'OAI-Sites-Authorization':'Bearer '+dashboard},timeout=12)
      if result.status_code!=200:print('Dashboard sync pending:',tab,result.status_code)
  save_thread=None;save_errors=[]
@@ -260,6 +241,7 @@ def main():
  comparison_capture.close()
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
 
 
 
