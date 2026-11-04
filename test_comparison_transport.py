@@ -11,7 +11,7 @@ Original=requests.Session
 class Local(Original):
  def post(self,url,**kw):
   assert 'OAI-Sites-Authorization' not in kw.get('headers',{});assert kw['headers'].get('X-Comparison-Key-Id')=='fixture'
-  return super().post(url.replace('https://nifty-straddle-lab.cosmicbay1.chatgpt.site',base),**kw)
+  return super().post(url.replace('https://nifty-straddle-lab.samuel-putla.chatgpt.site',base),**kw)
 # Only redirect transport; execute the real compacting/signing/publishing implementation.
 requests.Session=Local
 rows=compare_day('2026-11-02','Fixed Entry','Current Week',25,[],Quotes([]),[],{})
