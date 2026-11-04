@@ -1,0 +1,23 @@
+purpose:
+  stands_in_for: Google Sheets transient quota and service failures
+  unblocks: Verify the rolling collector transport and cached checkpoint retries
+assumptions:
+  - id: transient-read-retry
+    status: supported
+    claim: The actual gspread transport retries simulated 429 and 503 reads and returns the later success.
+    reason: The production transport ran against a local Postman HTTP fixture.
+    verification: On 2026-11-04 the fixture recorded three reads, two deterministic writes and one append; both tests passed. Appends were not retried. No live quota exhaustion was attempted.
+    source: sheets_resilience.py; test_sheets_resilience.py; postman/mocks/sheets-quota/default.js
+    updated_at: '2026-11-04'
+  - id: steady-state-live-quota
+    status: unknown
+    claim: The reduced request volume avoids shared-service-account quota exhaustion during a full live session.
+    reason: Other collectors share the quota and a full session has not run with this change.
+    verification: Unit tests establish one startup batch and no checkpoint rereads; production session verification remains pending.
+    source: rolling_collector.py; SHEETS_QUOTA_FIX.md
+    updated_at: '2026-11-04'
+fingerprints:
+  - id: local-quota-check
+    date: '2026-11-04'
+    commit: null
+    cli: 1.73.0
