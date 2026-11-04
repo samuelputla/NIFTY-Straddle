@@ -9,7 +9,9 @@ os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']=json.dumps({'private_key':pem,'private
 requests.post(base+'/fixture/config',json={'publicKey':public}).raise_for_status()
 Original=requests.Session
 class Local(Original):
- def post(self,url,**kw):return super().post(url.replace('https://nifty-straddle-lab.cosmicbay1.chatgpt.site',base),**kw)
+ def post(self,url,**kw):
+  assert 'OAI-Sites-Authorization' not in kw.get('headers',{});assert kw['headers'].get('X-Comparison-Key-Id')=='fixture'
+  return super().post(url.replace('https://nifty-straddle-lab.samuel-putla.chatgpt.site',base),**kw)
 # Only redirect transport; execute the real compacting/signing/publishing implementation.
 requests.Session=Local
 rows=compare_day('2026-11-02','Fixed Entry','Current Week',25,[],Quotes([]),[],{})
@@ -20,4 +22,5 @@ except RuntimeError:pass
 else:raise AssertionError('Expected publisher failure')
 after=requests.get(base+'/fixture/state').json();assert after['index']['sentAt']==before
 print('PASS production month compression, real RSA signing and HTTP publishing; failed storage does not claim success or replace index')
+
 
