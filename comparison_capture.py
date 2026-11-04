@@ -1,14 +1,14 @@
 """Optional bounded observer journal. No network, orders or shared strategy state."""
-import gzip,json,queue,threading,time
+import atexit,gzip,json,queue,threading,time
 from datetime import datetime
 from pathlib import Path
 VERSION='comparison-v1'
 class Capture:
  def __init__(self,day,source,enabled=True):
-  self.day,self.source,self.enabled=day,source,enabled;self.dropped=0;self.failed='';self.count=0;self.q=queue.Queue(20000);self.thread=None
+  self.day,self.source,self.enabled=day,source,enabled;self.dropped=0;self.failed='';self.count=0;self.q=queue.Queue(20000);self.thread=None;self.closed=False
   if enabled:
    try:
-    self.path=Path('comparison_capture_'+source+'.jsonl.gz');self.thread=threading.Thread(target=self._write,daemon=True);self.thread.start();self.put({'k':'start','date':day,'source':source,'version':VERSION,'normal':True})
+    self.path=Path('comparison_capture_'+source+'.jsonl.gz');self.thread=threading.Thread(target=self._write,daemon=True);self.thread.start();self.put({'k':'start','date':day,'source':source,'version':VERSION,'normal':True});atexit.register(self._abandon)
    except Exception as e:self.failed=type(e).__name__;self.enabled=False;self.thread=None
  def put(self,row):
   if not self.enabled:return
@@ -37,10 +37,16 @@ class Capture:
      if self.count%1000==0:f.flush()
      if self.path.stat().st_size>25*1024*1024:raise RuntimeError('Observer storage limit reached')
   except Exception as e:self.failed=type(e).__name__;self.enabled=False
+ def _abandon(self):
+  if not self.closed:
+   self.failed=self.failed or 'Process exited before explicit finalization';self.close()
  def close(self):
+  if self.closed:return
+  self.closed=True
   if not self.thread:return
   self.put({'k':'end','date':self.day,'source':self.source,'dropped':self.dropped,'failed':self.failed})
   try:self.q.put(None,timeout=1);self.thread.join(timeout=5)
   except queue.Full:self.failed='Undrained queue'
   if self.failed or self.dropped or self.thread.is_alive():print('Comparison observer incomplete; core results unchanged',self.failed,self.dropped)
+
 
