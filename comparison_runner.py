@@ -42,13 +42,15 @@ def download_captures(day,token,short_symbols,wing_keys):
     if a['size_in_bytes']>250*1024*1024:notes.append('Oversize observer artifact');continue
     r=session.get(f'https://api.github.com/repos/{REPO}/actions/artifacts/{a["id"]}/zip',timeout=(5,90));check(r)
     if len(r.content)>250*1024*1024:raise ValueError('Artifact download limit')
-    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+    try:z=zipfile.ZipFile(io.BytesIO(r.content))
+    except zipfile.BadZipFile:notes.append('Rejected ZIP artifact '+str(a['id']));continue
+    with z:
      for name in z.namelist():
       if not Path(name).name.startswith('comparison_capture_') or not name.endswith('.jsonl.gz'):continue
       info=z.getinfo(name)
       if info.file_size>250*1024*1024:raise ValueError('Capture size limit')
       try:source,events=read_capture(z.read(name),day,short_symbols,wing_keys)
-      except (ValueError,OSError) as e:notes.append(str(e));continue
+      except (ValueError,OSError,EOFError,zipfile.BadZipFile) as e:notes.append("Rejected capture in run "+str(run["id"])+" artifact "+str(a["id"])+": "+type(e).__name__);continue
       # Run lists are newest first; never mix two captures for the same collector.
       if source not in found:
        found[source]=events;notes.append('Capture '+source+' from https://github.com/'+REPO+'/actions/runs/'+str(run['id'])+' artifact '+str(a['id']))
@@ -81,15 +83,24 @@ def context_history(day):
 def publish(rows,contexts,token):
  from google.auth.crypt import RSASigner
  import base64
- signer=RSASigner.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']))
+ account=json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']);signer=RSASigner.from_service_account_info(account)
  from comparison_snapshot import compact
  months=sorted({str(r[1])[:7] for r in rows if len(r)>7 and str(r[6])==VERSION})
  index_months=sorted(set(months)|{str(r[1])[:7] for r in contexts if len(r)>2 and r[2]==VERSION})
  session=requests.Session();headers={'Content-Type':'application/json'}
- if token:headers['OAI-Sites-Authorization']='Bearer '+token
+ # This public Site authenticates this writer with an RSA signature, independently of browser/service sessions.
  def send(payload):
-  payload['sentAt']=dt.datetime.now(IST).isoformat();raw=json.dumps(payload,separators=(',',':')).encode();signed={**headers,'X-Comparison-Signature':base64.b64encode(signer.sign(raw)).decode()}
-  r=session.post('https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/comparisons',data=raw,headers=signed,timeout=(5,45));check(r)
+  payload['sentAt']=dt.datetime.now(IST).isoformat();raw=json.dumps(payload,separators=(',',':')).encode();signed={**headers,'X-Comparison-Signature':base64.b64encode(signer.sign(raw)).decode(),'X-Comparison-Key-Id':account['private_key_id']}
+  for attempt in range(4):
+   r=session.post('https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/comparisons',data=raw,headers=signed,timeout=(5,45),allow_redirects=False)
+   if r.status_code in (429,500,502,503,504) and attempt<3:time.sleep(2**attempt);continue
+   if r.status_code==401:
+    try:reason=str(r.json().get('reason','SIGNATURE_REJECTED'))
+    except ValueError:reason='GATEWAY_AUTH_REJECTED'
+    raise RuntimeError('Research publisher authentication failed: '+reason+'; signing key '+account['private_key_id'])
+   check(r)
+   if r.json().get('ok') is not True:raise RuntimeError('Research publisher did not confirm storage')
+   return
  for month in months:
   payload=compact([r for r in rows if str(r[1]).startswith(month)],month)
   if len(json.dumps(payload).encode())>3800000:raise ValueError('Comparison month snapshot too large; previous snapshot retained')
@@ -135,10 +146,15 @@ def month_rows(ws,month):
 def main():
  import gspread
  from google.oauth2.service_account import Credentials
- p=argparse.ArgumentParser();p.add_argument('--setup-only',action='store_true');args=p.parse_args();now=dt.datetime.now(IST);day=now.date().isoformat()
- client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets']));client.set_timeout((3,15));book=client.open_by_key(BOOK);writer=EvidenceWriter(book)
+ p=argparse.ArgumentParser();p.add_argument('--setup-only',action='store_true');p.add_argument('--publish-only',action='store_true');args=p.parse_args();now=dt.datetime.now(IST);day=now.date().isoformat()
+ from sheets_resilience import ResilientHTTPClient
+ client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets']),http_client=ResilientHTTPClient);client.set_timeout((3,15));book=client.open_by_key(BOOK);writer=EvidenceWriter(book)
  outws=comparison_sheet(book);contextws,prior_context=writer.sheet('Comparison Market Regimes',CONTEXT_HEADERS)
  if args.setup_only:print('Comparison schemas ready; no broker requests or baseline edits');return
+ if args.publish_only:
+  months=sorted({str(r[1])[:7] for r in prior_context[1:] if len(r)>2 and r[2]==VERSION})
+  for month in months:publish(month_rows(outws,month),prior_context[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
+  print('Saved comparison snapshots published; no broker calls or baseline writes');return
  if day<START:print('Comparison collection starts '+START+'; no historical results invented');return
  from market_calendar import session_allowed
  allowed,reason=session_allowed(day)
@@ -188,4 +204,5 @@ def main():
  publish(month_rows(outws,day[:7]),contextws.get_all_values()[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
  print(json.dumps({'date':day,'rows':len(rows),'baselineComplete':baseline_ok,'phase':phase,'unavailable':sum(r[7]=='UNAVAILABLE' for r in rows)}))
 if __name__=='__main__':main()
+
 
