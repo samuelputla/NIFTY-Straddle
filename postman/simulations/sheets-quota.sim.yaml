@@ -1,0 +1,6 @@
+simulation: sheets-quota
+routing: path
+mocks:
+  - routeKey: sheets
+    path: ../mocks/sheets-quota/config.yaml
+
