@@ -92,7 +92,7 @@ def publish(rows,contexts,token):
  def send(payload):
   payload['sentAt']=dt.datetime.now(IST).isoformat();raw=json.dumps(payload,separators=(',',':')).encode();signed={**headers,'X-Comparison-Signature':base64.b64encode(signer.sign(raw)).decode(),'X-Comparison-Key-Id':account['private_key_id']}
   for attempt in range(4):
-   r=session.post('https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/comparisons',data=raw,headers=signed,timeout=(5,45),allow_redirects=False)
+   r=session.post('https://nifty-straddle-lab.samuel-putla.chatgpt.site/api/comparisons',data=raw,headers=signed,timeout=(5,45),allow_redirects=False)
    if r.status_code in (429,500,502,503,504) and attempt<3:time.sleep(2**attempt);continue
    if r.status_code==401:
     try:reason=str(r.json().get('reason','SIGNATURE_REJECTED'))
