@@ -1,0 +1,10 @@
+version: 1
+name: sheets-quota
+slug: sheets-quota
+protocol: http
+port: 4910
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
+
