@@ -156,7 +156,8 @@ def main():
     # it never submits orders or calls historical/expired endpoints.
     for attempt in range(3):
      with lock:
-      symbols=sorted({l.symbol for s in studies for sc in s.scenarios.values() if sc.active for l in sc.active.open_legs()})
+      received=fresh_prices(prices,time.monotonic(),now().isoformat())
+      symbols=sorted({l.symbol for s in studies for sc in s.scenarios.values() if sc.active for l in sc.active.open_legs()}-set(received))
      if not symbols:break
      try:
       for i in range(0,len(symbols),50):
