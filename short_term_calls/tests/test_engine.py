@@ -60,6 +60,15 @@ class EntryTests(unittest.TestCase):
         a=valid_rows();a[2][3]=94
         self.assertEqual(evaluate(a)['status'],'Cancelled')
 
+    def test_stop_after_issue_before_signal_window_still_cancels(self):
+        a=valid_rows();a[1][3]=94
+        r=evaluate(a,plan(start_at='2026-11-09T09:20:00+05:30'))
+        self.assertEqual(r['status'],'Cancelled');self.assertIsNone(r['entry_at'])
+
+    def test_breakout_before_signal_window_does_not_qualify(self):
+        r=evaluate(rows(15),plan(start_at='2026-11-09T09:20:00+05:30'))
+        self.assertIsNone(r['breakout'])
+
     def test_missing_minute_blocks_entry(self):
         a=valid_rows();del a[12]
         r=evaluate(a)
