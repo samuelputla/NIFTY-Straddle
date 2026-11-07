@@ -124,7 +124,10 @@ class Study:
     if not all(l.symbol in quotes for l in opened):continue
     self.close(sc,quotes,at,'DELTA RESET',current);self.enter(sc,pair,at)
  def summary(self,at):
-  complete=all(s.done for s in self.scenarios.values());status='COMPLETED' if complete and not self.issues else 'INCOMPLETE' if self.issues else 'RUNNING'
+  # Lifecycle completion is independent of quality warnings.  A session is
+  # complete only when every scenario entered and every recorded leg settled.
+  complete=all(s.done and s.cycles and all(l.exit is not None for c in s.cycles for l in c.legs.values()) for s in self.scenarios.values())
+  status='COMPLETED' if complete else 'INCOMPLETE' if all(s.done for s in self.scenarios.values()) or self.issues else 'RUNNING'
   row=[self.day,self.family,self.choice,self.expiry,self.initial_at,self.initial_spot if self.initial_spot is not None else '',self.vix if self.vix is not None else '',status,at,'; '.join(self.issues) or 'Observed paper quotes; threshold SL fills; unscaled delta; no orders']
   for sc in self.scenarios.values():
    settled=bool(sc.cycles) and all(l.exit is not None for c in sc.cycles for l in c.legs.values())
