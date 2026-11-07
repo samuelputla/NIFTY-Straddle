@@ -103,7 +103,7 @@ def make_plan(candidate,kind,minutes,now,config,reject=None):
        'observe_until':datetime.combine(observe_day,time(15,30),IST).isoformat(),
        'trigger':trigger,'entry_min':trigger,'entry_max':top,'stop':stop,
        'target_1':tick(top+risk),'target_2':tick(top+2*risk),
-       'quantity':None,'total_costs':None,'policy':'Full Exit At T1',
+       'quantity':1,'quantity_mode':'one_share','total_costs':None,'policy':'Full Exit At T1',
        'source':'Automated Price And Volume Research V1',
        'rationale':f'Recent resistance {reference:.2f}; support {support:.2f}; '+
           f'normal-session turnover Rs {candidate["turnover_cr"]:.2f} crore; '+
