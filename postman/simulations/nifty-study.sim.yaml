@@ -1,0 +1,5 @@
+simulation: nifty-study
+routing: path
+mocks:
+  - routeKey: fyers
+    path: ../mocks/nifty-fyers/config.yaml
