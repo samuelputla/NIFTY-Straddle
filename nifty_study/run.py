@@ -104,7 +104,7 @@ def evaluate(prior,rows,day,key):
 def execute(connection_check=False):
     now=datetime.now(IST);day=str(now.date());OUT.mkdir(exist_ok=True)
     sheet=Sheets()
-    key=('connection:' if connection_check else 'daily:')+day+':'+RULE
+    key=('connection-equities:' if connection_check else 'daily:')+day+':'+RULE
     if sheet.has_run(key):
         return {'status':'ALREADY RECORDED','key':key}
     token=os.getenv('FYERS_ACCESS_TOKEN','').strip()
@@ -117,8 +117,18 @@ def execute(connection_check=False):
         if not history:
             raise Unavailable('Connection check returned no index candles')
         _,members,source=fetch_universe()
+        expected=str(datetime.fromtimestamp(history[-1][0],IST).date())
+        index_history=fyers.history('NSE:NIFTY50-INDEX',day)
+        verified_symbols=[]
+        for m in members:
+            bars=fyers.history('NSE:'+m['Symbol']+'-EQ',day)
+            if str(datetime.fromtimestamp(bars[-1][0],IST).date())!=expected:
+                raise Unavailable('Connection check: stock/index latest-session mismatch')
+            daily_features(bars,index_history)
+            verified_symbols.append(m['Symbol'])
         result={'status':'CONNECTION VERIFIED','session':day,'members':len(members),
-                'message':'Index history and constituent source readable; full equity collection not yet verified; no forecast created'}
+                'message':'Index and all 50 equity daily histories/required features verified for latest provider session '+expected+'; no forecast created'}
+        save('connection.json',dict(result,verified_symbols=verified_symbols,universe_source=source))
         sheet.publish(key,{'Study Runs':[[key,day,now.isoformat(),result['status'],50,'',RULE,digest(history),result['message'],run_url()]]})
         return result
     hours=session(day)
@@ -186,7 +196,12 @@ def execute(connection_check=False):
         reasons=json.dumps({'features':{k:r[k] for k in RULE_SPEC['weights']},'score_parts':r['parts']},sort_keys=True)
         forecast.append([fid,day,target,completed.isoformat(),RULE,universe_hash,input_hash,r['symbol'],rank,rank<=TOP,r['score'],reasons,r['coverage'],actual_ranks[r['symbol']],momentum[r['symbol']],sector[r['symbol']]])
         observations.append([key,day,r['symbol'],r['industry'],actual_ranks[r['symbol']],r['return'],r['gap'],r['intraday'],r['close'],r['volume'],r['rvol20'],r['sma20'],r['sma50'],r['rsi14'],r['macd'],r['signal'],r['atr14'],r['adx14'],r['stoch14'],r['resistance'],r['support'],r['breakout'],r['rs20'],r['sector_rs'],r['weekly'],r['trend15'],r['trend60'],r['vwap'],r['poc'],r['zone'],r['score'],json.dumps(r['evidence']),r['coverage']])
-    findings={'leaders':[r['symbol'] for r in ranked(rows,'return')[:TOP]],'next_candidates':[r['symbol'] for r in scoring[:TOP]],
+    leader_context=[{'symbol':r['symbol'],'return_pct':r['return'],'gap_pct':r['gap'],'open_to_close_pct':r['intraday'],
+                     'prior_20_session_breakout':r['breakout'],'relative_volume':r['rvol20'],'rsi14':r['rsi14'],
+                     'relative_strength_nifty_20_pp':r['rs20'],'verified_evidence_count':len(r['evidence']),
+                     'interpretation':'Observed technical context; causation and pre-session predictability unestablished'}
+                    for r in ranked(rows,'return')[:TOP]]
+    findings={'leaders':[r['symbol'] for r in ranked(rows,'return')[:TOP]],'leader_context':leader_context,'next_candidates':[r['symbol'] for r in scoring[:TOP]],
               'evaluations':evaluation,'limitations':issues+['Exploratory price-volume-v1; no validated edge',
               'Industry peer basket is a proxy, not official sector index', 'Volume profile and VWAP approximated from 15-minute candles',
               'No automatic fundamental extraction or causal news verification; Study Evidence requires reviewed sources',
@@ -197,7 +212,7 @@ def execute(connection_check=False):
                           'universe_source':universe_source,'universe_hash':universe_hash,'input_hash':input_hash,'rule_spec':RULE_SPEC,'session':day,
                           'target':target,'universe_scope':'current snapshot observed today; not a historical constituent reconstruction'})
     md=['# Nifty study',f'Session: {day}; target: {target}; frozen: {completed.isoformat()}',
-        '## Actual leaders',', '.join(findings['leaders']),'## Next-session paper candidates',', '.join(findings['next_candidates']),
+        '## Actual leaders',', '.join(findings['leaders']),'## Observed leader context',json.dumps(leader_context,indent=2),'## Next-session paper candidates',', '.join(findings['next_candidates']),
         '## Forecast evaluation',json.dumps(evaluation),'## Coverage and limitations',*['- '+x for x in findings['limitations']]]
     (OUT/'report.md').write_text('\n\n'.join(md),encoding='utf-8')
     sheet.publish(key,{'Study Observations':observations,'Study Forecasts':forecast,'Study Reviews':reviews,
@@ -207,6 +222,17 @@ def execute(connection_check=False):
 def run_url():
     repo=os.getenv('GITHUB_REPOSITORY','samuelputla/NIFTY-Straddle')
     return 'https://github.com/'+repo+'/actions/runs/'+os.getenv('GITHUB_RUN_ID','local')
+
+def record_failure(result):
+    """Best-effort visibility in the existing Sheet; never fabricate a forecast."""
+    now=datetime.now(IST)
+    key='failure:'+os.getenv('GITHUB_RUN_ID',now.isoformat())+':'+RULE
+    try:
+        Sheets().publish(key,{'Study Runs':[[key,str(now.date()),now.isoformat(),'DATA UNAVAILABLE',
+                          0,'',RULE,'',result['reason'],run_url()]]})
+    except Exception:
+        # Original failure evidence remains in the uploaded artifact even if Sheets is down.
+        pass
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--connection-check',action='store_true');args=p.parse_args()
@@ -220,9 +246,10 @@ def main():
         return 0
     except (Unavailable,ValueError,KeyError) as e:
         # Only our own sanitized error messages; never requests headers or credential objects.
-        result={'status':'DATA UNAVAILABLE','reason':str(e)[:250]};save('status.json',result);print(json.dumps(result));return 1
+        result={'status':'DATA UNAVAILABLE','reason':str(e)[:250]};save('status.json',result);record_failure(result);print(json.dumps(result));return 1
     except Exception:
-        save('status.json',{'status':'DATA UNAVAILABLE','reason':'Unexpected integration failure; inspect sanitized diagnostics'})
+        result={'status':'DATA UNAVAILABLE','reason':'Unexpected integration failure; inspect sanitized diagnostics'}
+        save('status.json',result);record_failure(result)
         print('Study failed; integration requires review (secrets omitted)');return 1
 
 if __name__=='__main__':

@@ -1,6 +1,9 @@
 import json
 import math
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from nifty_study.calendar import session,next_session
 from nifty_study.core import IST,daily_features,intraday_features,screen,review_outcome
@@ -79,4 +82,41 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(s.book.body['requests'][0]['appendCells']['rows'][0]['values'][1]['userEnteredValue'],{'stringValue':'=malicious()'})
         with self.assertRaises(ValueError): s.publish('key',{'Study Runs':[['bad']]})
 
+    def test_daily_end_to_end_fifty_rows_and_frozen_forecast(self):
+        import nifty_study.run as run
+        day=datetime.fromisoformat('2026-11-09T18:30:00+05:30')
+        class Clock(datetime):
+            @classmethod
+            def now(cls,tz=None): return day
+        daily=[];d=datetime(2026,1,1,tzinfo=IST)
+        while d.date()<=day.date():
+            if session(str(d.date())):
+                i=len(daily);daily.append([int(d.timestamp()),100+i,102+i,99+i,101+i,1000+i])
+            d+=timedelta(days=1)
+        members=[{'Symbol':f'S{i:02}','Industry':'Test','Series':'EQ'} for i in range(50)]
+        class Feed:
+            def __init__(self,*a,**kw): pass
+            def history(self,*a,**kw):
+                if kw.get('resolution')=='15': raise ValueError('Optional intraday absent')
+                return daily
+        schema=json.loads(Path(run.__file__).with_name('schema.json').read_text())
+        published={}
+        class Book:
+            def has_run(self,key): return False
+            def records(self,name): return []
+            def publish(self,key,tables):
+                for name,rows in tables.items():
+                    assert all(len(r)==len(schema[name]) for r in rows),name
+                published.update(tables)
+        with tempfile.TemporaryDirectory(dir='.') as out:
+            with patch.multiple(run,datetime=Clock,Sheets=Book,Fyers=Feed,OUT=Path(out)),patch.object(run,'fetch_universe',return_value=('fixture',members,'fixture')),patch.object(run,'public_get',return_value='<rss/>'),patch.dict('os.environ',{'FYERS_ACCESS_TOKEN':'synthetic'}):
+                result=run.execute()
+        self.assertEqual(result['status'],'COMPLETED')
+        self.assertEqual(len(published['Study Observations']),50)
+        forecasts=published['Study Forecasts']
+        self.assertEqual(len(forecasts),50)
+        self.assertEqual(sum(r[9] for r in forecasts),5)
+        self.assertTrue(all(r[2]=='2026-11-11' for r in forecasts))
+
 if __name__=='__main__': unittest.main()
+

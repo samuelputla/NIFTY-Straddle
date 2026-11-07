@@ -44,12 +44,13 @@ def fetch_universe():
     raise Unavailable('Both official constituent sources unavailable or invalid')
 
 class Fyers:
-    def __init__(self, token, out, base=None):
+    def __init__(self, token, out, base=None, interval=2.1):
         import requests
         self.session=requests.Session()
         self.session.headers['Authorization']=os.getenv('FYERS_CLIENT_ID','M2DACFCYUO-100')+':'+token
         self.base=base or 'https://api-t1.fyers.in/data'
         self.out=Path(out);self.out.mkdir(parents=True,exist_ok=True)
+        self.interval=interval;self.last_request=0
 
     def history(self,symbol,day,resolution='D',lookback=300):
         import requests
@@ -57,23 +58,37 @@ class Fyers:
         params={'symbol':symbol,'resolution':resolution,'date_format':'1','range_from':start,'range_to':day,'cont_flag':'0'}
         for attempt in range(3):
             try:
+                time.sleep(max(0,self.interval-(time.monotonic()-self.last_request)))
+                self.last_request=time.monotonic()
                 r=self.session.get(self.base+'/history',params=params,timeout=(5,25))
                 if r.status_code in (401,403):
                     raise Unavailable('FYERS authentication/access unavailable')
-                if r.status_code in (429,500,502,503,504) and attempt<2:
+                if r.status_code==429:
+                    raise Unavailable('FYERS rate limit reached; stopped without retry to protect shared account quota')
+                if r.status_code in (500,502,503,504) and attempt<2:
                     time.sleep(2**attempt);continue
-                r.raise_for_status();body=r.json()
+                if r.status_code>=400:
+                    raise Unavailable('FYERS HTTP '+str(r.status_code)+' for '+symbol)
+                body=r.json()
+                if body.get('code') in (-429,429,'-429','429'):
+                    raise Unavailable('FYERS rate limit reached; stopped without retry to protect shared account quota')
                 if body.get('s')!='ok':
                     raise Unavailable('FYERS history unavailable; code '+str(body.get('code')))
-                candles=validate_candles(body.get('candles'))
-                if any(str(datetime.fromtimestamp(b[0],IST).date())>day for b in candles):
-                    raise Unavailable('Future candle in historical response')
                 safe=symbol.replace(':','_').replace('/','_')
                 (self.out/(safe+'_'+resolution+'.json')).write_text(json.dumps({'request':params,'response':body}),encoding='utf-8')
-                time.sleep(.35)
+                try:
+                    candles=validate_candles(body.get('candles'))
+                except ValueError as error:
+                    raise Unavailable('FYERS '+str(error)+' for '+symbol) from None
+                if any(str(datetime.fromtimestamp(b[0],IST).date())>day for b in candles):
+                    raise Unavailable('Future candle in historical response')
                 return candles
             except Unavailable:
                 raise
+            except (requests.Timeout,requests.ConnectionError):
+                if attempt<2:
+                    time.sleep(2**attempt);continue
+                raise Unavailable('FYERS transport retry limit for '+symbol) from None
             except (requests.RequestException,ValueError,TypeError,KeyError):
                 raise Unavailable('FYERS HTTP/response failure for '+symbol) from None
         raise Unavailable('FYERS retry limit reached')
