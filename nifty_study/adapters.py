@@ -62,18 +62,27 @@ class Fyers:
                     raise Unavailable('FYERS authentication/access unavailable')
                 if r.status_code in (429,500,502,503,504) and attempt<2:
                     time.sleep(2**attempt);continue
-                r.raise_for_status();body=r.json()
+                if r.status_code>=400:
+                    raise Unavailable('FYERS HTTP '+str(r.status_code)+' for '+symbol)
+                body=r.json()
                 if body.get('s')!='ok':
                     raise Unavailable('FYERS history unavailable; code '+str(body.get('code')))
-                candles=validate_candles(body.get('candles'))
-                if any(str(datetime.fromtimestamp(b[0],IST).date())>day for b in candles):
-                    raise Unavailable('Future candle in historical response')
                 safe=symbol.replace(':','_').replace('/','_')
                 (self.out/(safe+'_'+resolution+'.json')).write_text(json.dumps({'request':params,'response':body}),encoding='utf-8')
-                time.sleep(.35)
+                try:
+                    candles=validate_candles(body.get('candles'))
+                except ValueError as error:
+                    raise Unavailable('FYERS '+str(error)+' for '+symbol) from None
+                if any(str(datetime.fromtimestamp(b[0],IST).date())>day for b in candles):
+                    raise Unavailable('Future candle in historical response')
+                time.sleep(.6)
                 return candles
             except Unavailable:
                 raise
+            except (requests.Timeout,requests.ConnectionError):
+                if attempt<2:
+                    time.sleep(2**attempt);continue
+                raise Unavailable('FYERS transport retry limit for '+symbol) from None
             except (requests.RequestException,ValueError,TypeError,KeyError):
                 raise Unavailable('FYERS HTTP/response failure for '+symbol) from None
         raise Unavailable('FYERS retry limit reached')
@@ -138,3 +147,4 @@ class Sheets:
                 return False
             raise Unavailable('Study publication failed; no blind write retry') from None
         return True
+
