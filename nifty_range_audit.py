@@ -82,13 +82,6 @@ def main():
                               'date_format':'1','range_from':str(start),'range_to':str(end),'cont_flag':'1'})
         if body.get('code') in (-429,429,'-429','429'):raise ValueError('FYERS rate-limit code; stopped without retry')
         if body.get('s')!='ok' or not body.get('candles'):
-            for test_symbol,test_resolution in [('NSE:SBIN-EQ','D'),('NSE:NIFTY50-INDEX','D'),('NSE:NIFTY50-INDEX','1')]:
-                time.sleep(2.1)
-                probe=sdk.history(data={'symbol':test_symbol,'resolution':test_resolution,'date_format':'1',
-                                        'range_from':str(end),'range_to':str(end),'cont_flag':'1'})
-                print('HISTORY_PROBE '+json.dumps({'symbol':test_symbol,'resolution':test_resolution,'date':str(end),
-                     'ok':probe.get('s')=='ok','code':probe.get('code'),'candles':len(probe.get('candles') or [])}))
-                if probe.get('code') in (-429,429,'-429','429'):break
             raise ValueError('FYERS history unavailable; code '+str(body.get('code')))
         (OUT/(str(start)+'_'+str(end)+'.json')).write_text(json.dumps(body),encoding='utf-8')
         for c in body['candles']:
@@ -99,7 +92,8 @@ def main():
     # One bounded request establishes whether today's earlier rate restriction persists.
     end=date(2026,11,6)
     fetch(date(2026,9,1),end)
-    start=date(2021,1,1)
+    print('HISTORY_RECENT '+json.dumps({'ok':True,'candles':len(candles),'from':'2026-09-01','through':str(end)}))
+    start=date(2022,1,1)
     while start<=end:
         stop=min(start+timedelta(days=299),end)
         fetch(start,stop);start=stop+timedelta(days=1)
@@ -109,7 +103,7 @@ def main():
     yearly={}
     for year in sorted({r['date'][:4] for r in rows}):yearly[year]=summarize([r for r in rows if r['date'].startswith(year)])
     result={'source':'FYERS daily NIFTY50 index history','as_of':datetime.now(IST).isoformat(),
-            'requests':requests_made,'raw_candle_count':len(candles),'coverage':'Provider-returned sessions; holidays/special-session completeness not independently reconciled. First available candle excluded where prior close is unavailable. 2026 is partial.',
+            'requests':requests_made,'raw_candle_count':len(candles),'coverage':'Requested 2022 onward after earlier 2021 batch was rejected; provider-returned sessions; holidays/special-session completeness not independently reconciled. First available candle excluded where prior close is unavailable. 2026 is partial.',
             'input_sha256':hashlib.sha256(json.dumps(sorted(candles.values())).encode()).hexdigest(),
             'overall':summarize(rows),'yearly':yearly,
             'largest_ranges':sorted(rows,key=lambda r:r['range_points'],reverse=True)[:5],
