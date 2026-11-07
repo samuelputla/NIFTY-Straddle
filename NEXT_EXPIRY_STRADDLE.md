@@ -28,7 +28,8 @@ change this study; compare versions deliberately.
 - Nearest-50 spot ATM CE and PE; entry quote requested as close to 09:30 IST as
   possible. Independent preparation can straddle a spot boundary; actual strike,
   quote-request/receipt time and the same late/ATM-shift flags are retained.
-- 65 units per leg; seven alternative stop percentages 10/15/20/25/30/35/40.
+- 65 units per leg; nine independent alternative stop percentages
+  10/15/20/25/30/35/40/45/50.
 - Each leg has its own original entry-premium stop. A first stop never moves the
   survivor's stop. No re-entry, rolling, trailing stop, hedge, or combined target.
 - Remaining legs exit at 15:00 IST, using the same core closing-quote/fallback
