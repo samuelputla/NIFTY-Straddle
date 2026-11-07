@@ -61,8 +61,10 @@ def main():
         nonlocal requests_made
         if requests_made:time.sleep(2.1)
         requests_made+=1
-        r=session.get('https://api-t1.fyers.in/data/history',params={'symbol':'NSE:NIFTY50-INDEX','resolution':'D',
-                     'date_format':'1','range_from':str(start),'range_to':str(end),'cont_flag':'0'},timeout=(5,25))
+        start_epoch=int(datetime.fromisoformat(str(start)+'T00:00:00+05:30').timestamp())
+        end_epoch=int(datetime.fromisoformat(str(end)+'T23:59:59+05:30').timestamp())
+        r=session.get('https://api-t1.fyers.in/data/history',params={'symbol':'NSE:NIFTY50-INDEX','resolution':'1D',
+                     'date_format':'0','range_from':str(start_epoch),'range_to':str(end_epoch)},timeout=(5,25))
         if r.status_code==429:raise ValueError('FYERS HTTP 429: rate limit still active; stopped after this request without retry')
         if r.status_code in (401,403):raise ValueError('FYERS authentication/access unavailable')
         if r.status_code!=200:
