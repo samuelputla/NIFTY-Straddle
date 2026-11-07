@@ -81,7 +81,15 @@ def main():
         body=sdk.history(data={'symbol':'NSE:NIFTY50-INDEX','resolution':'D',
                               'date_format':'1','range_from':str(start),'range_to':str(end),'cont_flag':'1'})
         if body.get('code') in (-429,429,'-429','429'):raise ValueError('FYERS rate-limit code; stopped without retry')
-        if body.get('s')!='ok' or not body.get('candles'):raise ValueError('FYERS history unavailable; code '+str(body.get('code')))
+        if body.get('s')!='ok' or not body.get('candles'):
+            for test_symbol,test_resolution in [('NSE:SBIN-EQ','D'),('NSE:NIFTY50-INDEX','D'),('NSE:NIFTY50-INDEX','1')]:
+                time.sleep(2.1)
+                probe=sdk.history(data={'symbol':test_symbol,'resolution':test_resolution,'date_format':'1',
+                                        'range_from':str(end),'range_to':str(end),'cont_flag':'1'})
+                print('HISTORY_PROBE '+json.dumps({'symbol':test_symbol,'resolution':test_resolution,'date':str(end),
+                     'ok':probe.get('s')=='ok','code':probe.get('code'),'candles':len(probe.get('candles') or [])}))
+                if probe.get('code') in (-429,429,'-429','429'):break
+            raise ValueError('FYERS history unavailable; code '+str(body.get('code')))
         (OUT/(str(start)+'_'+str(end)+'.json')).write_text(json.dumps(body),encoding='utf-8')
         for c in body['candles']:
             at=str(datetime.fromtimestamp(c[0],IST).date())
