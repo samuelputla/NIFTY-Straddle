@@ -11,16 +11,16 @@ assumptions:
     updated_at: "2026-11-07"
   - id: client-bounded-retry
     status: supported
-    claim: The study HTTP client retries rate limits at most three times and rejects auth errors, malformed candles and outages.
+    claim: The corrected study client stops immediately on rate limits and rejects auth errors, malformed candles and persistent outages.
     reason: Executed the real HTTP client against the Node contract fixture and observed expected success/failure outcomes.
-    verification: On 2026-11-07 ran nifty_study.tests.http_probe against the local fixture; success, two 429 responses then success, 401, malformed OHLCV and persistent 503 checks passed. Postman simulation startup failed in Windows dataset daemon, so the identical Node fixture was served directly. No Postman simulation pass is claimed.
+    verification: On 2026-11-07 the initial fixture passed bounded 429 retries, but real all-equity collection then hit FYERS limits. After reading the updated Standard-plan limits, changed to 2.1-second pacing and immediate 429 stop. Re-ran the actual client against the fixture; success, exactly one request on 429, auth failure, malformed OHLCV and persistent 503 passed. Ten logic tests also passed. Postman simulation startup failed in Windows dataset daemon, so the identical Node fixture was served directly. No Postman simulation pass is claimed.
     source: nifty_study/tests/http_probe.py; postman/mocks/nifty-fyers/default.js
     updated_at: "2026-11-07"
   - id: live-equity-sheet-access
     status: unknown
     claim: Existing workflow secrets permit authenticated FYERS equity collection and study-tab publication.
     reason: Secret values are never accessed locally; must verify through a real GitHub workflow run.
-    verification: Existing Sheet metadata and newly added tabs verified with connected tools; live workflow connection check pending.
+    verification: On 2026-11-07 initial GitHub run 42342771988 verified FYERS index history, official constituents and Sheet write/readback. Full equity checks hit rate limits; stopped further live tests and corrected pacing. Full scheduled equity readiness remains unverified.
     source: .github/workflows/nifty-study.yml
     updated_at: "2026-11-07"
 fingerprints:

@@ -223,6 +223,17 @@ def run_url():
     repo=os.getenv('GITHUB_REPOSITORY','samuelputla/NIFTY-Straddle')
     return 'https://github.com/'+repo+'/actions/runs/'+os.getenv('GITHUB_RUN_ID','local')
 
+def record_failure(result):
+    """Best-effort visibility in the existing Sheet; never fabricate a forecast."""
+    now=datetime.now(IST)
+    key='failure:'+os.getenv('GITHUB_RUN_ID',now.isoformat())+':'+RULE
+    try:
+        Sheets().publish(key,{'Study Runs':[[key,str(now.date()),now.isoformat(),'DATA UNAVAILABLE',
+                          0,'',RULE,'',result['reason'],run_url()]]})
+    except Exception:
+        # Original failure evidence remains in the uploaded artifact even if Sheets is down.
+        pass
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--connection-check',action='store_true');args=p.parse_args()
     try:
@@ -235,11 +246,11 @@ def main():
         return 0
     except (Unavailable,ValueError,KeyError) as e:
         # Only our own sanitized error messages; never requests headers or credential objects.
-        result={'status':'DATA UNAVAILABLE','reason':str(e)[:250]};save('status.json',result);print(json.dumps(result));return 1
+        result={'status':'DATA UNAVAILABLE','reason':str(e)[:250]};save('status.json',result);record_failure(result);print(json.dumps(result));return 1
     except Exception:
-        save('status.json',{'status':'DATA UNAVAILABLE','reason':'Unexpected integration failure; inspect sanitized diagnostics'})
+        result={'status':'DATA UNAVAILABLE','reason':'Unexpected integration failure; inspect sanitized diagnostics'}
+        save('status.json',result);record_failure(result)
         print('Study failed; integration requires review (secrets omitted)');return 1
 
 if __name__=='__main__':
     sys.exit(main())
-

@@ -1,5 +1,5 @@
 name: Nifty study
-run-name: Nifty equity study · ${{ github.event_name }}
+run-name: Nifty equity study Â· ${{ github.event_name }}
 on:
   schedule:
     # 18:30 IST every day, including special sessions. Unknown calendars fail closed.
@@ -35,8 +35,9 @@ jobs:
       - name: Verify deterministic study logic
         run: python -m unittest discover -s nifty_study/tests -v
       - name: Collect, study and publish
+        if: github.event_name != 'push'
         env:
-          CHECK_CONNECTION: ${{ github.event_name == 'push' || inputs.connection_check }}
+          CHECK_CONNECTION: ${{ inputs.connection_check }}
         run: |
           if [ "$CHECK_CONNECTION" = "true" ]; then
             python -m nifty_study.run --connection-check
