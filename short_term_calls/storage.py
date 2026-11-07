@@ -11,15 +11,16 @@ PORTFOLIO='Short Term Portfolio'
 SCHEMAS={
  CALLS:['Call ID','Symbol','Type','Issued At','Start At','Enter By','Exit By','Observe Until',
         'Trigger','Entry Min','Entry Max','Stop','Target 1','Target 2','Quantity','Total Costs',
-        'Exit Policy','Source','Rationale','Limitations','Plan Hash','Plan JSON','Registered At'],
+        'Exit Policy','Source','Rationale','Limitations','Plan Hash','Plan JSON','Registered At','Paper Selection'],
  STATUS:['Call ID','Symbol','Type','Status','Breakout At','Retest Observed','Confirmation At',
          'Paper Entry At','Paper Entry','Exit At','Exit Price','Exit Reason','Gross Per Share',
          'Gross P&L','Net P&L','Observed MFE Per Share','Observed MAE Per Share','Missed Targets',
          'Post Exit Touches','Missing Minutes','As Of','Method','Evidence Hash',
-         'Gross Return %','Estimated Costs','Net Return %','Quantity','Last Price','Last Minute'],
+         'Gross Return %','Estimated Costs','Net Return %','Quantity','Last Price','Last Minute',
+         'Planned T1 R','Planned T2 R','Realized R'],
  EVENTS:['Event ID','Call ID','Event','Observed Minute IST','Price','Detail'],
  RUNS:['Run ID','As Of','Stage','Status','Call Count','Detail','Workflow URL','Version'],
- PORTFOLIO:['Account','Initial Capital','Realized Estimated Net','Realized ROI %','Unrealized Gross',
+ PORTFOLIO:['Account','Initial Capital','Realized Gross','Gross ROI %','Unrealized Gross',
             'Deployed Capital','Reserved Capital','Available Cash','Selected Calls','Review Calls','As Of','Cost Assumption']}
 
 
@@ -27,7 +28,7 @@ def row_for_plan(p,now):
     return [p[k] if p.get(k) is not None else '' for k in
         ('id','symbol','type','issued_at','start_at','enter_by','exit_by','observe_until','trigger',
          'entry_min','entry_max','stop','target_1','target_2','quantity','total_costs','policy','source','rationale')]+[
-        p.get('limitations',''),digest(p),json.dumps(p,sort_keys=True),now]
+        p.get('limitations',''),digest(p),json.dumps(p,sort_keys=True),now,bool(p.get('portfolio_selected',False))]
 
 
 class Store:
@@ -55,6 +56,8 @@ class Store:
             if len(row)<23:raise ValueError('Incomplete frozen call')
             p=json.loads(row[21]);validate_plan(p)
             if digest(p)!=row[20] or p['id']!=row[0]:raise ValueError('Frozen plan changed')
+            if len(row)>=24 and str(row[23]).lower()!=str(bool(p.get('portfolio_selected',False))).lower():
+                raise ValueError('Visible paper selection changed')
             # Visible original fields must still agree with their sealed JSON.
             expected=row_for_plan(p,row[22])
             from .engine import number
@@ -96,8 +99,9 @@ class Store:
            ', '.join(result['missed_targets']),', '.join(result['post_exit_touches']),
            result['missing_minutes'],result['as_of'],result['method'],result['evidence_hash'],
            result['gross_return_pct'] or '',result['estimated_costs'] or '',result['net_return_pct'] or '',
-           p.get('quantity') or '',result['last_price'] or '',result['last_at'] or '']
-        for i in (8,10,12,13,14,15,16,23,24,25,26,27):
+           p.get('quantity') or '',result['last_price'] or '',result['last_at'] or '',
+           result['planned_t1_r'],result['planned_t2_r'],result['realized_r'] or '']
+        for i in (8,10,12,13,14,15,16,23,24,25,26,27,29,30,31):
             if row[i]!='':row[i]=float(row[i])
         incoming=[[e[k] for k in ('id','call_id','kind','at','price','detail')] for e in result['events']]
         prior={r[0]:r for r in self.cache.snapshot(EVENTS)[1:] if r}
@@ -117,10 +121,13 @@ class Store:
             if not r:continue
             def value(i):return r[i] if len(r)>i and r[i]!='' else None
             out[r[0]]={'call_id':r[0],'status':value(3),'entry_at':value(7),'entry_price':value(8),
-                       'exit_at':value(9),'net_pnl':value(14),'last_price':value(27),'as_of':value(20)}
+                       'exit_at':value(9),'gross_pnl':value(13),'net_pnl':value(14),'last_price':value(27),'as_of':value(20)}
         return out
 
     def portfolio(self,s):
+        s=dict(s)
+        if 'realized_gross' in s:
+            s['realized_estimated_net']=s['realized_gross'];s['realized_roi_pct']=s['gross_roi_pct']
         row=['Short Term Paper Account']+[
             s[k] if s[k] is not None else '' for k in ('initial_capital','realized_estimated_net','realized_roi_pct',
             'unrealized_gross','deployed','reserved','available_cash','selected_calls','review_calls','as_of','cost_note')]
