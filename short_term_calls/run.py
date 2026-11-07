@@ -117,7 +117,7 @@ def main():
                     p['start_at']=(issued.replace(second=0)+timedelta(minutes=5)).isoformat()
                 existing_results=store.results()
                 ps=dict(portfolio_settings)
-                ps['daily_selection_count']=max(0,ps['daily_selection_count']-sum(p.get('portfolio_selected',False) for p in today))
+                ps['daily_selection_counts']={kind:max(0,ps.get('daily_'+kind.lower(),3)-sum(p.get('portfolio_selected',False) and p['type']==kind for p in today)) for kind in ('Intraday','Swing')}
                 generated=select_portfolio(proposed,plans,existing_results,issued,ps)
                 store.register_many(generated,issued.isoformat())
                 # The next normal tracking run supplies the first market-status rows.
@@ -129,7 +129,7 @@ def main():
             store.run(run_id,datetime.now(IST).isoformat(),'Generation',status,len(generated),
                       'Versioned price/volume paper rule; fundamentals/news/depth unverified. No orders.',workflow_url,VERSION)
         store.run(run_id,now.isoformat(),'Tracking','Passed',len(results),
-                  'One-minute reconstruction; all calls researched, top three selected prospectively for Rs300000 paper account; '+
+                  'One-share gross research; daily top three Intraday and three Swing selected prospectively; Rs300000 paper account; '+
                   ('normal session' if allowed else 'market closed'),workflow_url,VERSION)
         store.portfolio(portfolio_summary(store.plans(),store.results(),portfolio_settings,datetime.now(IST).isoformat()))
         (OUT/'results.json').write_text(json.dumps(results,indent=2))
