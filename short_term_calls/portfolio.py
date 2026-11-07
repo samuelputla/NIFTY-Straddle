@@ -17,6 +17,8 @@ def estimated_costs(p,entry,exit_price):
 
 def select(plans,existing,results,now,settings):
     """Select before any new plan can enter; never use new calls' eventual outcomes."""
+    if settings.get('quantity_mode')=='one_share':
+        return select_one_share(plans,existing,results,settings)
     capital=number(settings['initial_capital'])
     reserve=number(0);realized=number(0);slots={'Intraday':0,'Swing':0}
     for p in existing:
@@ -62,6 +64,8 @@ def select(plans,existing,results,now,settings):
 
 
 def summary(plans,results,settings,now):
+    if settings.get('quantity_mode')=='one_share':
+        return summary_one_share(plans,results,settings,now)
     capital=number(settings['initial_capital']);realized=number(0);unrealized=number(0)
     deployed=number(0);reserved=number(0);unknown=[];selected=0
     for p in plans:
@@ -84,3 +88,51 @@ def summary(plans,results,settings,now):
             'available_cash':str(capital+realized-deployed-reserved),
             'selected_calls':selected,'review_calls':','.join(sorted(set(unknown))),
             'as_of':now,'cost_note':'Estimated net uses illustrative 0.15% each side + Rs40 round trip; not a broker contract note. Unrealized excludes future exit costs.'}
+
+
+def select_one_share(plans,existing,results,settings):
+    limits=settings.get('daily_selection_counts',{'Intraday':settings.get('daily_intraday',3),'Swing':settings.get('daily_swing',3)})
+    used={'Intraday':set(),'Swing':set()};counts={'Intraday':0,'Swing':0}
+    account=summary_one_share(existing,results,settings,'')
+    cash=number(account['available_cash'])
+    for p in plans:
+        p['quantity']=1;p['total_costs']=None;p.pop('cost_model',None)
+        p['quantity_mode']='one_share'
+        risk=number(p['entry_max'])-number(p['stop'])
+        p['portfolio_rank_score']=float(number(p['selection_evidence']['ranking_score'])-10*risk/number(p['entry_max']))
+    ordered=sorted(plans,key=lambda p:(-p['portfolio_rank_score'],p['symbol'],p['type']))
+    for rank,p in enumerate(ordered,1):
+        kind=p['type'];p['portfolio_rank']=rank;p['portfolio_selected']=False
+        reason='Outside daily top three for '+kind
+        if counts[kind]<limits[kind] and p['symbol'] not in used[kind]:
+            if number(p['entry_max'])<=cash:
+                p['portfolio_selected']=True;counts[kind]+=1;used[kind].add(p['symbol'])
+                cash-=number(p['entry_max'])
+                reason='Selected prospectively in daily top three '+kind+'; exactly one share'
+            else:reason='Insufficient unleveraged paper cash for one share'
+        p['portfolio_selection_reason']=reason
+    return ordered
+
+
+def summary_one_share(plans,results,settings,now):
+    capital=number(settings['initial_capital']);realized=number(0);unrealized=number(0)
+    deployed=number(0);reserved=number(0);unknown=[];selected=0
+    for p in plans:
+        if not p.get('portfolio_selected'):continue
+        selected+=1;r=results.get(p['id'],{});qty=p.get('quantity',1)
+        if r.get('status')=='Closed':
+            if r.get('gross_pnl') in (None,''):unknown.append(p['id'])
+            else:realized+=number(r['gross_pnl'])
+        elif r.get('entry_price') not in (None,''):
+            if r.get('status')=='Review Required':unknown.append(p['id'])
+            deployed+=number(r['entry_price'])*qty
+            if r.get('last_price') not in (None,''):unrealized+=(number(r['last_price'])-number(r['entry_price']))*qty
+            else:unknown.append(p['id'])
+        elif r.get('status') not in ('Cancelled','Expired Unfilled'):reserved+=number(p['entry_max'])*qty
+    return {'initial_capital':str(capital),'realized_gross':str(realized),
+        'gross_roi_pct':None if unknown else str(100*realized/capital),
+        'realized_estimated_net':None,'realized_roi_pct':None,
+        'unrealized_gross':str(unrealized),'deployed':str(deployed),'reserved':str(reserved),
+        'available_cash':str(capital+realized-deployed-reserved),'selected_calls':selected,
+        'review_calls':','.join(sorted(set(unknown))),'as_of':now,
+        'cost_note':'Exactly one share per setup. Gross price returns; fees and slippage excluded, net left unknown. Top three Intraday and top three Swing selected daily. ROI denominator Rs300000.'}
