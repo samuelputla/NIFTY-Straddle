@@ -65,7 +65,13 @@ def main():
                      'date_format':'1','range_from':str(start),'range_to':str(end),'cont_flag':'0'},timeout=(5,25))
         if r.status_code==429:raise ValueError('FYERS HTTP 429: rate limit still active; stopped after this request without retry')
         if r.status_code in (401,403):raise ValueError('FYERS authentication/access unavailable')
-        if r.status_code!=200:raise ValueError('FYERS HTTP '+str(r.status_code))
+        if r.status_code!=200:
+            try:
+                error=r.json();message=str(error.get('message',''))[:180].replace(token,'[redacted]')
+                code=str(error.get('code',''))
+            except (ValueError,AttributeError):
+                code='';message='Non-JSON response'
+            raise ValueError('FYERS HTTP '+str(r.status_code)+'; code '+code+'; '+message)
         body=r.json()
         if body.get('code') in (-429,429,'-429','429'):raise ValueError('FYERS rate-limit code; stopped without retry')
         if body.get('s')!='ok' or not body.get('candles'):raise ValueError('FYERS history unavailable; code '+str(body.get('code')))
@@ -103,3 +109,4 @@ if __name__=='__main__':
         message=str(e) if isinstance(e,ValueError) and str(e).startswith(('FYERS','Provider','Overlapping','Malformed','Invalid','Insufficient')) else 'Data retrieval failed; no statistical conclusion'
         OUT.mkdir(exist_ok=True);(OUT/'status.json').write_text(json.dumps({'status':'UNAVAILABLE','reason':message}))
         print('RANGE_STATUS '+json.dumps({'status':'UNAVAILABLE','reason':message}));sys.exit(1)
+
