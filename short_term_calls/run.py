@@ -73,7 +73,7 @@ def main():
             active.append(p)
         for symbol in sorted({p['symbol'] for p in active}):
             group=[p for p in active if p['symbol']==symbol]
-            begin=min(stamp(p['start_at']) for p in group)
+            begin=min(stamp(p['issued_at']).replace(second=0,microsecond=0)+timedelta(minutes=1) for p in group)
             finish=min(now,max(stamp(p['observe_until']) for p in group))
             if finish<=begin:continue
             cache[symbol]=history.fetch(symbol,begin,finish)
