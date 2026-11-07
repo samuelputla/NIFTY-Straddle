@@ -18,12 +18,37 @@ GitHub cron aims at16:07 IST (10:37 UTC). The independent16:07 cloud request sup
 
 Checks include session completeness, duplicate cycles, expiry/DTE, ATM against recorded spot and entry-minute range, entry/reset/exit chronology, leg SL threshold consistency, missed minute-high crossings, full cycle candle coverage, arithmetic and assumedRs150/cycle costs. Saved delta entry/roll fields can be checked for strict change>0.35 and replacement neutrality; OHLC cannot independently prove the original continuous delta path. Historical/candle reconstructions remain identified. Quote ranges cannot prove second-level executable fills. Entry-minute SL ordering is explicitly limited.
 
-Results: PASSED (available checks consistent, with listed limitations), REVIEW (record/rule/price discrepancy), DATA UNAVAILABLE (not enough source evidence). Authentication or structural/arithmetic errors fail the job so its normal GitHub failure mechanisms apply. Reports do not guarantee email delivery or broker execution. Market calendar is verified7Oct–31Dec2026 from NSEFAOP71777; unknown dates fail closed. Existing collectors also need their calendars maintained for2027. FYERS access may require renewal; no automatic credential bypass is attempted.
+Results: PASSED (available checks consistent, with listed limitations), REVIEW (record/rule/price discrepancy), DATA UNAVAILABLE (not enough source evidence). Authentication or structural/arithmetic errors fail the job so its normal GitHub failure mechanisms apply. Reports do not guarantee email delivery or broker execution. Market calendar is verified7Octâ€“31Dec2026 from NSEFAOP71777; unknown dates fail closed. Existing collectors also need their calendars maintained for2027. FYERS access may require renewal; no automatic credential bypass is attempted.
 
-To inspect: Actions → Daily Historical Validation → latest run → Job summary or daily-validation artifact. For one-off historical verification, audit_date accepts a past session date. It never starts positions. No manual trigger is required for the saved daily schedules.
+To inspect: Actions â†’ Daily Historical Validation â†’ latest run â†’ Job summary or daily-validation artifact. For one-off historical verification, audit_date accepts a past session date. It never starts positions. No manual trigger is required for the saved daily schedules.
 
 
 ## Isolated comparison research
 
 From 2 November 2026, the existing fixed/rolling collectors optionally journal their existing observations without extra live API requests/subscriptions. A separate job in the existing 16:07 validation workflow reads the artifacts and reconciled baseline rows, writes only Research Comparisons and Comparison Market Regimes, then publishes the Comparisons dashboard tab. No fourth manual start is required. Explicit past-date audit runs do not publish current-day research. See RESEARCH_COMPARISONS.md for frozen variants, RBI event scope, no-look-ahead gates, evidence gaps and the 60+30 session evaluation plan. Merge/activate the reviewed collector PR before expecting forward data.
+
+## Additional research workflow health
+
+Automatic Session Control now checks `short-strangle.yml` and `nifty-study.yml`
+read-only whenever its existing cloud control request runs, and through its own
+09:20 and 17:20 IST daily cron. Manual `check_new_workflows=true` runs only this
+inspection, regardless of the default probe checkbox. It never starts or restarts
+these two collectors. Their original schedules remain 09:10 and 16:30 IST.
+
+Before preparation grace ends the report says NOT DUE, not failed. Short Strangle
+is expected started by 09:20 and completed by 15:15. Nifty study is expected started
+by 16:40 and completed by 17:05. Use each workflow's own market calendar; the
+8 November equity special session is not treated as a normal F&O session.
+Only schedule/manual executions count; equity push tests do not count as collection.
+The report includes current-day run links and failed job/step names. Missing,
+queued, failed, overdue, ambiguous or inaccessible executions fail the health job
+so configured GitHub notifications can surface them. Notifications require the
+user's GitHub settings; delivery is not guaranteed. SUCCESS means job execution,
+not independent validation of forecast quality, prices or published Sheet rows.
+
+Inspect the run summary and workflow-health.json/md artifacts. GitHub cron is still
+best effort; these checks are not an independent real-time scheduler. Existing
+09:07/16:07 cloud controls also include status checks, but a separate post-16:30
+cloud wake-up is not configured by this change. Failed or partial runs need review,
+not blind reruns. No core strategy or broker permissions were changed.
 
