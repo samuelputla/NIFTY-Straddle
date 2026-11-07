@@ -1,6 +1,6 @@
 # Nifty study
 
-An isolated equity research workflow beside the existing straddle studies. Scheduled at 18:30 IST daily; GitHub scheduling is best effort. Uses the verified 2026 NSE equity calendar, including the 8 November Muhurat session. It fails closed beyond 2026 until the calendar is maintained. No broker orders or strategy modifications.
+An isolated equity research workflow beside the existing straddle studies. Scheduled at 16:30 IST daily; GitHub scheduling is best effort. Uses the verified 2026 NSE equity calendar, including the 8 November Muhurat session. It fails closed beyond 2026 until the calendar is maintained. No broker orders or strategy modifications.
 
 ## First implementation
 
