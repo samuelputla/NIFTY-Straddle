@@ -1,0 +1,6 @@
+simulation: short-term
+routing: path
+mocks:
+  - routeKey: fyers
+    origin: [api-t1.fyers.in]
+    path: ../mocks/short-term-history/config.yaml

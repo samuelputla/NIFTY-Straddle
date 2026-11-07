@@ -1,0 +1,22 @@
+{
+  "start_at": "2026-11-09T09:15:00+05:30",
+  "selection": {
+    "min_price": 50,
+    "min_turnover_cr": 100,
+    "candidate_count": 0,
+    "max_5session_rally_pct": 12,
+    "intraday_max_risk_pct": 2.5,
+    "swing_max_risk_pct": 5,
+    "min_risk_pct": 0.3,
+    "entry_band_pct": 0.15,
+    "trigger_buffer_pct": 0.05,
+    "swing_holding_sessions": 5,
+    "post_exit_sessions": 5
+  },
+  "future_trade_selection": {"max_intraday": 3, "max_swing": 3, "live_orders_enabled": false},
+  "paper_scope": "Track all qualifying setups; select top three daily for a separate funded paper portfolio. Candidate count zero means no ranking truncation.",
+  "portfolio": {"initial_capital":300000,"daily_selection_count":3,
+    "max_intraday_open":3,"max_swing_open":3,"risk_per_trade_pct":0.5,
+    "max_trade_allocation_pct":15,"cash_reserve_pct":10,
+    "cost_model":{"name":"Illustrative Total Friction V1","rate_per_side":0.0015,"fixed_round_trip":40}}
+}

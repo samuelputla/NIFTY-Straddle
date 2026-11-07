@@ -15,3 +15,7 @@ credentials/
 *.log
 nifty-study-report/
 short_strangle_output/
+
+short-term-report/
+.short-term-test-deps/
+short-term-fixture*.log

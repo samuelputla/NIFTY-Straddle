@@ -1,0 +1,9 @@
+version: 1
+name: short-term-history
+slug: short-term-history
+protocol: http
+port: 4922
+scenarios:
+  - name: default
+    path: ./default.js
+    default: true
