@@ -161,7 +161,7 @@ class GenerationTests(unittest.TestCase):
         now=datetime(2026,11,9,9,50,tzinfo=IST)
         p=make_plan(self.candidate(),'Intraday',a,now,dict(DEFAULTS,intraday_max_risk_pct=5))
         self.assertIsNotNone(p);self.assertGreater(p['start_at'],p['issued_at'])
-        self.assertIsNone(p['quantity']);self.assertEqual(p['policy'],'Full Exit At T1')
+        self.assertEqual(p['quantity'],1);self.assertEqual(p['policy'],'Full Exit At T1')
 
     def test_missing_opening_minutes_no_call(self):
         self.assertIsNone(make_plan(self.candidate(),'Swing',rows(20),datetime(2026,11,9,9,50,tzinfo=IST),DEFAULTS))
