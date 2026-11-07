@@ -2,8 +2,8 @@ name: Nifty study
 run-name: Nifty equity study Â· ${{ github.event_name }}
 on:
   schedule:
-    # 18:30 IST every day, including special sessions. Unknown calendars fail closed.
-    - cron: '0 13 * * *'
+    # 16:30 IST every day, including special sessions. Unknown calendars fail closed.
+    - cron: '0 11 * * *'
   workflow_dispatch:
     inputs:
       connection_check:
