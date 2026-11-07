@@ -17,7 +17,7 @@ SCHEMAS={
          'Gross P&L','Net P&L','Observed MFE Per Share','Observed MAE Per Share','Missed Targets',
          'Post Exit Touches','Missing Minutes','As Of','Method','Evidence Hash',
          'Gross Return %','Estimated Costs','Net Return %','Quantity','Last Price','Last Minute',
-         'Planned T1 R','Planned T2 R','Realized R'],
+         'Planned T1 R','Planned T2 R','Realized R','T2 Observed After Entry','First T2 Minute'],
  EVENTS:['Event ID','Call ID','Event','Observed Minute IST','Price','Detail'],
  RUNS:['Run ID','As Of','Stage','Status','Call Count','Detail','Workflow URL','Version'],
  PORTFOLIO:['Account','Initial Capital','Realized Gross','Gross ROI %','Unrealized Gross',
@@ -100,7 +100,8 @@ class Store:
            result['missing_minutes'],result['as_of'],result['method'],result['evidence_hash'],
            result['gross_return_pct'] or '',result['estimated_costs'] or '',result['net_return_pct'] or '',
            p.get('quantity') or '',result['last_price'] or '',result['last_at'] or '',
-           result['planned_t1_r'],result['planned_t2_r'],result['realized_r'] or '']
+           result['planned_t1_r'],result['planned_t2_r'],result['realized_r'] or '',
+           result['t2_observed_after_entry'],result['t2_first_touch_at'] or '']
         for i in (8,10,12,13,14,15,16,23,24,25,26,27,29,30,31):
             if row[i]!='':row[i]=float(row[i])
         incoming=[[e[k] for k in ('id','call_id','kind','at','price','detail')] for e in result['events']]
