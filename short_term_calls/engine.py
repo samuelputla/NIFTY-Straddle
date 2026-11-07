@@ -103,10 +103,13 @@ def replay(p, raw, as_of):
     validate_plan(p)
     now=stamp(as_of)
     start,enter_by,exit_by,observe=map(stamp,(p['start_at'],p['enter_by'],p['exit_by'],p['observe_until']))
+    # Cancellation starts with the first fully observable minute after issue,
+    # even when the prospective signal window opens a few minutes later.
+    monitor_start=stamp(p['issued_at']).replace(second=0,microsecond=0)+timedelta(minutes=1)
     stop,trigger,lo,hi,t1,t2=map(lambda k:number(p[k]),('stop','trigger','entry_min','entry_max','target_1','target_2'))
     rows=candles(raw,now)
     data={r[0]:r for r in rows}
-    expected=list(expected_minutes(start,min(now,observe)))
+    expected=list(expected_minutes(monitor_start,min(now,observe)))
     missing=[t for t in expected if t not in data]
     first_gap=missing[0] if missing else None
     events=[]
@@ -134,7 +137,7 @@ def replay(p, raw, as_of):
     for ts,o,h,l,c,v in rows:
         at=datetime.fromtimestamp(ts,IST)
         end=at+timedelta(minutes=1)
-        if at<start or at>=observe:continue
+        if at<monitor_start or at>=observe:continue
         o,h,l,c=map(number,(o,h,l,c))
         iso=at.isoformat()
         last_price,last_at=c,iso
@@ -198,7 +201,7 @@ def replay(p, raw, as_of):
         group.append((at,o,h,l,c))
         boundary=(end.hour*60+end.minute-555)%15==0
         complete=len(group)==15 and group[0][0]+timedelta(minutes=15)==end
-        if not (boundary and complete and entry is None and at<=enter_by):continue
+        if not (boundary and complete and group[0][0]>=start and entry is None and at<=enter_by):continue
         if state in ('Cancelled','Expired Unfilled','Needs Revalidation','Data Incomplete'):continue
         close=group[-1][4]
         if breakout is None:
