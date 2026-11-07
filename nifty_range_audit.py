@@ -55,7 +55,21 @@ def main():
     token=os.getenv('FYERS_ACCESS_TOKEN','').strip()
     if not token:raise ValueError('FYERS workflow access unavailable')
     client=os.getenv('FYERS_CLIENT_ID','M2DACFCYUO-100')
-    session=requests.Session();session.headers['Authorization']=client+':'+token
+    session=requests.Session();session.headers['Authorization']=token if token.startswith(client+':') else client+':'+token
+    # Only success flags leave the runner; profile data and credential values never do.
+    for label,url,params in [
+        ('profile','https://api-t1.fyers.in/api/v3/profile',None),
+        ('index_quote','https://api-t1.fyers.in/data/quotes',{'symbols':'NSE:NIFTY50-INDEX'})]:
+        check=session.get(url,params=params,timeout=(5,25))
+        if check.status_code==429:raise ValueError('FYERS rate limit active during '+label+'; stopped without retry')
+        try:payload=check.json()
+        except ValueError:raise ValueError('FYERS non-JSON response during '+label)
+        ok=check.status_code==200 and payload.get('s')=='ok'
+        if label=='index_quote':
+            ok=ok and bool(payload.get('d')) and all(x.get('s')=='ok' for x in payload['d'])
+        print('CONNECTION_CHECK '+json.dumps({'check':label,'ok':ok,'http_status':check.status_code,'code':payload.get('code')}))
+        if not ok:raise ValueError('FYERS '+label+' check failed; code '+str(payload.get('code')))
+        time.sleep(2.1)
     candles={};requests_made=0
     def fetch(start,end):
         nonlocal requests_made
