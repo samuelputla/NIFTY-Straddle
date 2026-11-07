@@ -10,6 +10,10 @@ from comparison_capture import Capture
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
+def fresh_prices(prices,mono,at,max_age=10):
+ # Never attribute a previous-minute quote to a later entry/reset minute.
+ minute=at[:16]
+ return {symbol:item[0] for symbol,item in prices.items() if len(item)>=3 and 0<=mono-item[1]<=max_age and item[2][:16]==minute}
 def title(family,choice):return f'{family} - {choice}'
 def main():
  import gspread
@@ -72,7 +76,7 @@ def main():
   symbol=message.get('symbol');price=message.get('ltp')
   if symbol and good(price) and price>0:
    with lock:
-    stamp=now().isoformat();comparison_capture.quote(stamp,symbol,price);prices[symbol]=(price,time.monotonic())
+    stamp=now().isoformat();comparison_capture.quote(stamp,symbol,price);prices[symbol]=(price,time.monotonic(),stamp)
     if '09:30:00'<=stamp[11:19]<'15:00:00':
      for study in studies:study.tick(symbol,price,stamp)
  def on_connect():connected.set()
@@ -120,7 +124,7 @@ def main():
   if not cached or mono-cached['at']>30:return None,{},{}
   d=cached['data'];rows=d['optionsChain'];spot=next((x.get('ltp') for x in rows if x.get('option_type') not in ['CE','PE']),None)
   if not good(spot) or spot<=0:return None,{},{}
-  strike=int((spot+25)//50)*50;pair={'at':cached['at'],'spot':spot,'strike':strike};gs={};qs={sym:p for sym,(p,received) in prices.items() if 0<=mono-received<=10}
+  strike=int((spot+25)//50)*50;pair={'at':cached['at'],'spot':spot,'strike':strike};gs={};qs=fresh_prices(prices,mono,now().isoformat())
   for x in rows:
    sym=x.get('symbol');delta=x.get('greeks',{}).get('delta')
    if good(delta):gs[sym]=delta
@@ -148,21 +152,27 @@ def main():
   last_monotonic=mono
   if clock>=dt_time(15,0):
    if not final:
-    with lock:
-     symbols=sorted({l.symbol for s in studies for sc in s.scenarios.values() if sc.active for l in sc.active.open_legs()})
-    for i in range(0,len(symbols),50):
+    # Retry only the still-open symbols.  This remains quote-only and bounded;
+    # it never submits orders or calls historical/expired endpoints.
+    for attempt in range(3):
+     with lock:
+      symbols=sorted({l.symbol for s in studies for sc in s.scenarios.values() if sc.active for l in sc.active.open_legs()})
+     if not symbols:break
      try:
-      response=call('quotes',{'symbols':','.join(symbols[i:i+50])})
-      with lock:
-       for x in response['d']:
-        v=x.get('v',{});lp=v.get('lp')
-        if good(lp) and lp>0:prices[x['n']]=(lp,time.monotonic())
+      for i in range(0,len(symbols),50):
+       response=call('quotes',{'symbols':','.join(symbols[i:i+50])});received=now().isoformat()
+       with lock:
+        for x in response['d']:
+         v=x.get('v',{});lp=v.get('lp')
+         if good(lp) and lp>0:prices[x['n']]=(lp,time.monotonic(),received)
      except Exception as error:
       print('Final quote request unavailable:',type(error).__name__)
-      for study in studies:study.issue('Final REST quote unavailable; review final coverage')
+      if attempt==2:
+       for study in studies:study.issue('Final REST quote unavailable; review final coverage')
+     if attempt<2:time.sleep(1)
     with lock:
-     quotes={s:p for s,(p,age) in prices.items() if time.monotonic()-age<=10}
-     for study in studies:study.advance(now().isoformat(),None,quotes,{},time.monotonic())
+     final_at=now().isoformat();quotes=fresh_prices(prices,time.monotonic(),final_at)
+     for study in studies:study.advance(final_at,None,quotes,{},time.monotonic())
      for study in studies:
       if not all(sc.done for sc in study.scenarios.values()):study.issue('INCOMPLETE final quotes')
     if save_thread:save_thread.join(timeout=180)
@@ -201,7 +211,7 @@ def main():
        response=call('quotes',{'symbols':','.join(needed)});fresh=quote_prices(response,needed);received=now().isoformat()
        with lock:
         for symbol,price in fresh.items():
-         prices[symbol]=(price,time.monotonic())
+         prices[symbol]=(price,time.monotonic(),received)
          for study in studies:study.tick(symbol,price,received)
         reset_diagnostics[key]={'at':received,'readiness':'REST RESPONSE RECEIVED; engine deadline still applies','symbols':needed}
       except Exception as error:
