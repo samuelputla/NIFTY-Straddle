@@ -1,0 +1,29 @@
+name: One-off Nifty daily movement audit
+on:
+  push:
+    branches: ['research/nifty-range-audit-20261107']
+    paths: ['nifty_range_audit.py', '.github/workflows/nifty-range-audit.yml']
+permissions:
+  contents: read
+concurrency:
+  group: nifty-range-audit-once
+  cancel-in-progress: false
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'requests>=2.31,<3'
+      - run: python nifty_range_audit.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nifty-range-audit-${{ github.run_id }}
+          path: nifty-range-report/
+          retention-days: 30
