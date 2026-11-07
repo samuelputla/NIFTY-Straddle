@@ -1,0 +1,30 @@
+purpose:
+  stands_in_for: FYERS historical candle HTTP responses only
+  unblocks: Study client serialization, retry and safe-failure checks without broker credentials
+assumptions:
+  - id: fyers-history-contract
+    status: supported
+    claim: FYERS documents GET /data/history with symbol, resolution, date bounds and OHLCV candles.
+    reason: Provider market-data documentation was inspected; fixture models only this narrow response.
+    verification: On 2026-11-07 inspected official FYERS documentation. Actual authenticated equity collection remains unverified.
+    source: https://fyers.in/api-docs/ai/skills/market-data; nifty_study/adapters.py
+    updated_at: "2026-11-07"
+  - id: client-bounded-retry
+    status: supported
+    claim: The study HTTP client retries rate limits at most three times and rejects auth errors, malformed candles and outages.
+    reason: Executed the real HTTP client against the Node contract fixture and observed expected success/failure outcomes.
+    verification: On 2026-11-07 ran nifty_study.tests.http_probe against the local fixture; success, two 429 responses then success, 401, malformed OHLCV and persistent 503 checks passed. Postman simulation startup failed in Windows dataset daemon, so the identical Node fixture was served directly. No Postman simulation pass is claimed.
+    source: nifty_study/tests/http_probe.py; postman/mocks/nifty-fyers/default.js
+    updated_at: "2026-11-07"
+  - id: live-equity-sheet-access
+    status: unknown
+    claim: Existing workflow secrets permit authenticated FYERS equity collection and study-tab publication.
+    reason: Secret values are never accessed locally; must verify through a real GitHub workflow run.
+    verification: Existing Sheet metadata and newly added tabs verified with connected tools; live workflow connection check pending.
+    source: .github/workflows/nifty-study.yml
+    updated_at: "2026-11-07"
+fingerprints:
+  - id: initial-study-client
+    date: "2026-11-07"
+    commit: null
+    cli: Postman 1.73.0; Python 3.12

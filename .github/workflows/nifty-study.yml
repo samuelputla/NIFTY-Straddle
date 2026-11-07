@@ -1,0 +1,53 @@
+name: Nifty study
+run-name: Nifty equity study · ${{ github.event_name }}
+on:
+  schedule:
+    # 18:30 IST every day, including special sessions. Unknown calendars fail closed.
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      connection_check:
+        description: Check FYERS history, constituent source and Sheet access without a forecast
+        type: boolean
+        default: false
+  push:
+    paths:
+      - '.github/workflows/nifty-study.yml'
+      - 'nifty_study/**'
+permissions:
+  contents: read
+concurrency:
+  group: nifty-equity-study
+  cancel-in-progress: false
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r nifty_study/requirements.txt
+      - name: Verify deterministic study logic
+        run: python -m unittest discover -s nifty_study/tests -v
+      - name: Collect, study and publish
+        env:
+          CHECK_CONNECTION: ${{ github.event_name == 'push' || inputs.connection_check }}
+        run: |
+          if [ "$CHECK_CONNECTION" = "true" ]; then
+            python -m nifty_study.run --connection-check
+          else
+            python -m nifty_study.run
+          fi
+      - name: Preserve raw inputs, frozen forecast and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nifty-study-${{ github.run_id }}
+          path: nifty-study-report/
+          retention-days: 90
+          if-no-files-found: warn

@@ -1,0 +1,8 @@
+{
+  "Study Runs": ["Run Key", "Session", "Created At", "Status", "Universe Count", "Target Session", "Rule Version", "Input Hash", "Findings", "Run URL"],
+  "Study Observations": ["Run Key", "Session", "Symbol", "Industry", "Rank", "Return %", "Gap %", "Open to Close %", "Close", "Volume", "RVOL20", "SMA20", "SMA50", "RSI14", "MACD", "MACD Signal", "ATR14", "ADX14", "Stochastic14", "Resistance20", "Support20", "Breakout", "Nifty RS20 pp", "Sector Proxy RS20 pp", "Weekly Return %", "15m Trend %", "60m Trend %", "Approx VWAP", "Profile POC Approx", "Order Block Zone", "Score", "Evidence", "Coverage"],
+  "Study Forecasts": ["Forecast ID", "Source Session", "Target Session", "Created At", "Rule Version", "Universe Hash", "Input Hash", "Symbol", "Rank", "Selected", "Score", "Reasons", "Coverage", "Baseline Prior Winner Rank", "Baseline Momentum Rank", "Baseline Sector Rank"],
+  "Study Reviews": ["Review Key", "Session", "Forecast ID", "Symbol", "Selected", "Actual Rank", "Return %", "Gap %", "Open to Close %", "Outcome", "Review", "Rule Version"],
+  "Study Evidence": ["Evidence ID", "Symbol", "Category", "Published At", "Observed At", "Source URL", "Finding", "Verified", "Metric", "Value", "Period", "Basis"],
+  "Study Changes": ["Change ID", "Observed Session", "Symbol", "Issue", "Hypothesis", "Evidence Needed", "Status", "Rule Version"]
+}
