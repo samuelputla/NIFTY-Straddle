@@ -1,0 +1,37 @@
+purpose:
+  stands_in_for: Narrow FYERS history GET response contract, without real credentials
+  unblocks: Short Term client validation and safe failure handling
+assumptions:
+  - id: history-completed-minute-contract
+    status: supported
+    claim: FYERS history returns OHLCV arrays timestamped at candle starts and can return incomplete current candles.
+    reason: Official historical-data documentation was read; caller requests only prior completed minutes and validates returned OHLCV.
+    verification: On 2026-11-07 inspected current provider documentation and ran deterministic timestamp and malformed-candle tests. Authenticated deployment check remains a separate required check.
+    source: https://fyers.in/api-docs/v3/api/market-data/historical-data; short_term_calls/providers.py
+    updated_at: "2026-11-07"
+  - id: windows-simulation-runtime
+    status: contradicted
+    claim: Postman simulation can start normally on this Windows host.
+    reason: Dataset daemon exited with a Windows invalid-handle error before serving any request.
+    verification: On 2026-11-07 Postman 1.73.0 simulation startup failed. A direct Node contract fixture and Linux CI probe are supplied; no Postman simulation pass is claimed.
+    source: postman/mocks/short-term-history/default.js; .github/workflows/short-term-calls.yml
+    updated_at: "2026-11-07"
+  - id: provider-account-access
+    status: unknown
+    claim: Existing workflow secrets permit the new Short Term runner to fetch equity history and update its dedicated journal tabs.
+    reason: Requires an authenticated GitHub run; no broker or Google credentials are extracted locally.
+    verification: Deployment connection check is required before claiming readiness.
+    source: .github/workflows/short-term-calls.yml
+    updated_at: "2026-11-07"
+  - id: local-http-client-failure-handling
+    status: supported
+    claim: The new history client handles the modeled success, auth, HTTP/body rate-limit, outage, HTML, malformed and out-of-range responses without retrying the provider request.
+    reason: The actual Python HTTP client was exercised against the identical narrow Node contract fixture on loopback port 4923.
+    verification: On 2026-11-07 all eight cases passed, and fixture logs showed exactly one history request per case. Thirty-eight rule, storage and portfolio tests also passed. This proves those caller paths against the fixture, not authenticated broker access or a successful Postman simulation run.
+    source: short_term_calls/tests/http_probe.py; postman/mocks/short-term-history/default.js
+    updated_at: "2026-11-07"
+fingerprints:
+  - id: short-term-installation
+    date: "2026-11-07"
+    commit: null
+    cli: Postman 1.73.0; local Python 3.15; GitHub Python 3.11
