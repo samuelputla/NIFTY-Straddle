@@ -10,7 +10,7 @@ try:
     IST = ZoneInfo('Asia/Kolkata')
 except ZoneInfoNotFoundError:
     IST = timezone(timedelta(hours=5,minutes=30), 'IST')
-VERSION = 'short-term-paper-v1'
+VERSION = 'short-term-paper-v2-unit-share'
 HOLIDAYS = {'2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25'}
 FIRST, LAST = date(2026, 10, 7), date(2026, 12, 31)
 
@@ -132,6 +132,7 @@ def replay(p, raw, as_of):
     group=[]
     previous_bucket=None
     last_price=last_at=None
+    t2_first_touch=None
     missed=[]
     post=[]
     for ts,o,h,l,c,v in rows:
@@ -170,6 +171,9 @@ def replay(p, raw, as_of):
                                'Breakout Without Retest' if not retest_seen else
                                'Retest Without Valid Entry')
                         event('Missed '+label,iso,level,phase+'; no trading P&L')
+        if entry is not None and h>=t2 and t2_first_touch is None:
+            t2_first_touch=iso
+            event('T2 Observed After Entry',iso,t2,'Reached within this minute, including possible exit minute; exact ordering relative to stop/exit may be unknown. Observation only, not extra booked profit.')
         if entry is not None and exit_at is None and not ambiguous:
             if gap_before:
                 ambiguous=True;state='Review Required';exit_reason='Data Gap After Entry'
@@ -233,6 +237,7 @@ def replay(p, raw, as_of):
             from .portfolio import estimated_costs
             costs=estimated_costs(p,entry,exit_price)
     net=None if gross is None or costs is None else gross-costs
+    risk=None if entry is None else entry-stop
     return {'call_id':p['id'],'status':state,'breakout':None if breakout is None else breakout.isoformat(),
             'retest_observed':retest_seen,'confirmation':None if confirm is None else confirm.isoformat(),
             'entry_at':None if entry_at is None else entry_at.isoformat(),'entry_price':None if entry is None else str(entry),
@@ -242,6 +247,9 @@ def replay(p, raw, as_of):
             'gross_return_pct':None if gross_per_share is None else str(100*gross_per_share/entry),
             'estimated_costs':None if costs is None else str(costs),
             'net_return_pct':None if net is None else str(100*net/(entry*p['quantity'])),
+            'planned_t1_r':str((t1-hi)/(hi-stop)),'planned_t2_r':str((t2-hi)/(hi-stop)),
+            'realized_r':None if gross_per_share is None else str(gross_per_share/risk),
+            't2_observed_after_entry':t2_first_touch is not None,'t2_first_touch_at':t2_first_touch,
             'last_price':None if last_price is None else str(last_price),'last_at':last_at,
             'observed_mfe_through_exit_minute':None if upper is None else str(upper-entry),
             'observed_mae_through_exit_minute':None if lower is None else str(entry-lower),
