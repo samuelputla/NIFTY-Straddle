@@ -55,7 +55,7 @@ def main():
     token=os.getenv('FYERS_ACCESS_TOKEN','').strip()
     if not token:raise ValueError('FYERS workflow access unavailable')
     client=os.getenv('FYERS_CLIENT_ID','M2DACFCYUO-100')
-    session=requests.Session();session.headers['Authorization']=token if token.startswith(client+':') else client+':'+token
+    session=requests.Session();session.headers.update({'Authorization':token if token.startswith(client+':') else client+':'+token,'Content-Type':'application/json','version':'3'})
     # Only success flags leave the runner; profile data and credential values never do.
     for label,url,params in [
         ('profile','https://api-t1.fyers.in/api/v3/profile',None),
