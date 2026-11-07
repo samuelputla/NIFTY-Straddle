@@ -50,5 +50,18 @@ class OneShareTests(unittest.TestCase):
         output=select([p],[],{},datetime(2026,11,9,9,50,tzinfo=IST),SETTINGS)
         self.assertFalse(output[0]['portfolio_selected']);self.assertEqual(output[0]['quantity'],1)
 
+    def test_t2_in_t1_exit_minute_retained_without_extra_profit(self):
+        rows=valid_rows();rows[32][2]=121
+        r=replay(plan(quantity=1),rows,'2026-11-09T10:15:00+05:30')
+        self.assertTrue(r['t2_observed_after_entry'])
+        self.assertEqual(r['gross_pnl'],'9.5')
+        self.assertEqual(r['t2_first_touch_at'],r['exit_at'])
+
+    def test_t2_without_entry_is_missed_not_after_entry(self):
+        from test_engine import rows
+        data=rows(45);data[20][2]=121
+        r=replay(plan(quantity=1),data,'2026-11-09T10:15:00+05:30')
+        self.assertFalse(r['t2_observed_after_entry']);self.assertIn('T2',r['missed_targets'])
+
 
 if __name__=='__main__':unittest.main()
