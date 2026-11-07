@@ -17,10 +17,10 @@ assumptions:
     source: postman/mocks/short-term-history/default.js; .github/workflows/short-term-calls.yml
     updated_at: "2026-11-07"
   - id: provider-account-access
-    status: unknown
+    status: supported
     claim: Existing workflow secrets permit the new Short Term runner to fetch equity history and update its dedicated journal tabs.
-    reason: Requires an authenticated GitHub run; no broker or Google credentials are extracted locally.
-    verification: Deployment connection check is required before claiming readiness.
+    reason: Authenticated installation runs returned a full prior-session equity minute history and wrote success records and the Rs300000 portfolio summary to the dedicated workbook tabs.
+    verification: On 2026-11-07 branch run 42360524427 and main run 42360600267 passed 38 rule/storage/portfolio tests, eight HTTP fixture cases, and the live FYERS/Sheets check. Independently read back the Sheet Connection Passed row and Rs300000 account. PR62 merged as 57cfac9f63741816a54d0d7c3642535c5331b527; workflow state is active. Future scheduled generation and trade-path performance are not yet observed.
     source: .github/workflows/short-term-calls.yml
     updated_at: "2026-11-07"
   - id: local-http-client-failure-handling
