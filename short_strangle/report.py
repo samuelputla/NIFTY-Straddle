@@ -20,7 +20,8 @@ def audit(state):
             'quantity_assumption':QTY, 'round_trip_cost_assumption':COST,
             'statuses':dict(Counter(s.status for s in scenarios)),
             'summary':summary_rows(scenarios),
-            'notes':'Accounting/configuration audit only; no historical candle or executable-fill validation. Exclude INCOMPLETE results from completed-performance analysis.'}
+            'coverage_warning_scenarios':sum(bool(s.notes) for s in scenarios),
+            'notes':'COMPLETED means both paper exits are filled. Coverage notes remain independent: exclude scenarios with quote gaps from clean performance analysis. No executable-fill validation.'}
 
 def main():
     folder = Path('short_strangle_output')

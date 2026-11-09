@@ -8,6 +8,18 @@ def sample():
     return make_scenarios('2026-11-09', 25000, '2026-11-09T09:30:01+05:30', dict.fromkeys(CHOICES, '2026-11-09'), contracts)
 
 class Rules(unittest.TestCase):
+    def test_closed_positions_complete_despite_coverage_warning(self):
+        s = sample()[0]
+        s.enter(dict.fromkeys(s.symbols.values(),100),'2026-11-09T09:30:02+05:30')
+        s.issue('Open-contract quote gap >10 seconds; stop path incomplete')
+        s.finish({s.symbols['CE']:90},'2026-11-09T15:00:01+05:30')
+        self.assertEqual(s.status, 'INCOMPLETE')
+        self.assertEqual(s.net, '')
+        s.finish({s.symbols['PE']:80},'2026-11-09T15:00:02+05:30')
+        self.assertEqual(s.status, 'COMPLETED')
+        self.assertEqual(s.net, 1800)
+        self.assertTrue(s.notes)
+
     def test_report_rejects_duplicate_and_bad_stop(self):
         scenarios = sample()
         self.assertEqual(audit({'scenarios':[asdict(s) for s in scenarios]})['scenarios'],81)

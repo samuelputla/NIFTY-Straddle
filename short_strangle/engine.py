@@ -96,8 +96,13 @@ class Scenario:
     @property
     def status(self):
         if self.missed: return 'MISSED ENTRY'
+        # Completion describes closed paper positions; coverage remains in notes.
+        if (set(self.entries) == {'CE', 'PE'} and set(self.exits) == {'CE', 'PE'}
+                and all(positive(self.entries[s]) and positive(self.exits[s][0])
+                        and self.exits[s][1] and self.exits[s][2] for s in ('CE', 'PE'))):
+            return 'COMPLETED'
         if self.notes: return 'INCOMPLETE'
-        return 'COMPLETED' if len(self.exits) == 2 else 'RUNNING'
+        return 'RUNNING'
 
     @property
     def net(self):
