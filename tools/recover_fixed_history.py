@@ -49,6 +49,11 @@ def candles(symbol, start, end, expired=False):
         except ValueError:
             body = {}
         status = {'symbol': symbol, 'from': start, 'to': end, 'endpoint': route, 'http': response.status_code, 'code': body.get('code'), 'status': body.get('s'), 'candles': len(body.get('candles', []))}
+        status['reason'] = str(body.get('message','')).replace(token, '[REDACTED]')[:240]
+        if response.status_code != 200:
+            status['validation'] = str(body.get('data', {})).replace(token, '[REDACTED]')[:400]
+            if expired:
+                expired_blocked = True
         report['requests'].append(status)
         if response.status_code == 401 or body.get('code') in (-16, '-16'):
             auth_blocked = True
