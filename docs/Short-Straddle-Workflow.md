@@ -13,7 +13,7 @@ The Fixed Entry Straddles GitHub workflow performs paper research on NIFTY ATM s
 
 ## Two Active Fixed-Entry Tabs
 
-**Short Straddle Summary** has one row per date and expiry choice. All original 83 columns remain in their original order, followed by Expiry Choice (column CF). It captures:
+**Straddle Fixed Summary** has one row per date and expiry choice. All original 83 columns remain in their original order, followed by Expiry Choice (column CF). It captures:
 
 - Date, weekday, calendar DTE, expiry, ATM strike, and entry VIX.
 - Prior-session high/low/close, day opening, gap direction and percentage.
@@ -22,7 +22,7 @@ The Fixed Entry Straddles GitHub workflow performs paper research on NIFTY ATM s
 - Rupee net results for each of the nine scenarios, individual CE/PE point results, and stop-level/hit descriptions.
 - Entry request/retrieval times, option last-trade timestamps when available, OI/VIX retrieval times, source/status notes, and run status.
 
-**Short Straddle Logs** has one row per date, expiry choice, and stop percentage (normally 27 rows per full day). The original 31 columns remain in order, followed by Expiry Choice (column AF). It captures date/time, NIFTY spot, VIX, ATM, expiry, SL percentage, CE/PE symbols, entry/stop/exit prices, stop-hit indicators and times, exit reasons, leg and combined point P&L, status, last update, run type, weekday, and DTE.
+**Straddle Fixed Logs** has one row per date, expiry choice, and stop percentage (normally 27 rows per full day). The original 31 columns remain in order, followed by Expiry Choice (column AF). It captures date/time, NIFTY spot, VIX, ATM, expiry, SL percentage, CE/PE symbols, entry/stop/exit prices, stop-hit indicators and times, exit reasons, leg and combined point P&L, status, last update, run type, weekday, and DTE.
 
 Log P&L fields are premium points. Summary `% Profit` fields are the combined point result multiplied by 65, less ₹150. The historical column labels are retained to preserve the requested layout.
 
