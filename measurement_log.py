@@ -39,6 +39,8 @@ class EvidenceWriter:
   if rows[0]!=headers:raise RuntimeError('Unexpected measurement schema: '+title)
   return ws,rows
  def save(self,title,headers,rows,update=False):
+  # Retired sheet: collectors must never recreate or publish execution measurements.
+  if title=='Execution Measurements':return
   if not rows:return
   with self.lock:
    ws,prior=self.sheet(title,headers);positions={r[0]:i for i,r in enumerate(prior[1:],2) if r and r[0]};updates=[];new=[]
