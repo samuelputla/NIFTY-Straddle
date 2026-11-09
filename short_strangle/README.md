@@ -12,7 +12,7 @@ Separate project module and workflow; existing straddle engines, Sheet tabs and 
 - Each leg independently stops at its own entry premium × (1 + SL/100). Nine parallel SLs: 10,15,20,25,30,35,40,45,50%. Stops fill at the rounded threshold as in the original paper project. A stopped leg stays closed. No re-entry or resets.
 - At 15:00, surviving legs exit using a new REST quote response; record actual receipt time. Missing final marks leave unresolved positions and blank net P&L.
 - Quantity 65 per leg and INR150 round-trip assumed costs per entered scenario match the original project for comparison. These are paper assumptions, not verified current contract lots, actual charges or margin. Never add the 81 alternative outcomes as simultaneous portfolio profit.
-- Unhedged short strangles have no guaranteed maximum loss. Stops can gap and threshold fills can overstate performance. Quote/socket/processing gaps mark results INCOMPLETE. This engine cannot establish tick-complete market coverage or executable fills. No real orders are supported.
+- Unhedged short strangles have no guaranteed maximum loss. Stops can gap and threshold fills can overstate performance. COMPLETED means both paper exits, their timestamps/reasons, and net P&L are filled; it does not certify market-data coverage. Quote/socket/processing gaps remain in Coverage Notes even after completion. Exclude those scenarios from clean performance analysis. Missing exits remain INCOMPLETE. This engine cannot establish tick-complete market coverage or executable fills. No real orders are supported.
 
 ## Workbook And Quotas
 
@@ -25,6 +25,8 @@ One startup batch read; one reservation write before any entries; one combined t
 Existing same-day rows block a restart, including partial sessions. Never clear them to force a new entry. Grid capacity expands in chunks before writing. Initial grids are bounded; no other tabs are modified.
 
 ## Automation And Evidence
+
+The separate `short-strangle-close.yml` runs at 15:05 IST weekdays (best effort) and shares the collector's concurrency group. It only reconciles existing sessions, never enters positions. It fetches FYERS 15:00 one-minute reference prices, retains all existing observed/stop exits, and recovers wholly missing exits using the exact 15:00 candle OPEN only. Recovered marks are explicitly labelled as simulated recovery proxies, not exact tick fills. No later candle or current quote substitutes for a missing 15:00 candle. Complete scenarios and summary groups become COMPLETED while retaining coverage notes. Missing or partial exit records remain unresolved. Before/after evidence and FYERS reference responses are retained as artifacts for 30 days. Manual dispatch accepts an existing session date; the scoped `.automation/short-strangle-close.json` push trigger checks today's existing session.
 
 Dedicated `short-strangle.yml` uses existing FYERS and Google service-account repository secrets with a distinct concurrency group. Schedule 09:10 IST weekdays, best effort; delayed starts after 09:30:20 refuse entries. Verified repository session calendar fails closed outside its supported period. No existing workflow is changed. An additional socket shares account limits with existing collectors; first-session provider capacity must be observed.
 
