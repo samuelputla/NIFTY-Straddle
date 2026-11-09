@@ -106,14 +106,6 @@ jobs:
       - name: Run selected fixed-entry straddle
         run: python -u ${{ matrix.script }}
 
-      - name: Sync strategy snapshots even after a missed entry
-        if: ${{ always() && !inputs.setup_only }}
-        env:
-          STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
-        run: python -u sync_dashboard.py
-
-
-
       - name: Preserve additive execution evidence
         if: always()
         uses: actions/upload-artifact@v4

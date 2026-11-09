@@ -80,34 +80,6 @@ def context_history(day):
  except Exception as e:notes.append('VIX context unavailable: '+type(e).__name__)
  return result,notes
 
-def publish(rows,contexts,token):
- from google.auth.crypt import RSASigner
- import base64
- account=json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']);signer=RSASigner.from_service_account_info(account)
- from comparison_snapshot import compact
- months=sorted({str(r[1])[:7] for r in rows if len(r)>7 and str(r[6])==VERSION})
- index_months=sorted(set(months)|{str(r[1])[:7] for r in contexts if len(r)>2 and r[2]==VERSION})
- session=requests.Session();headers={'Content-Type':'application/json'}
- # This public Site authenticates this writer with an RSA signature, independently of browser/service sessions.
- def send(payload):
-  payload['sentAt']=dt.datetime.now(IST).isoformat();raw=json.dumps(payload,separators=(',',':')).encode();signed={**headers,'X-Comparison-Signature':base64.b64encode(signer.sign(raw)).decode(),'X-Comparison-Key-Id':account['private_key_id']}
-  for attempt in range(4):
-   r=session.post('https://nifty-straddle-lab.samuel-putla.chatgpt.site/api/comparisons',data=raw,headers=signed,timeout=(5,45),allow_redirects=False)
-   if r.status_code in (429,500,502,503,504) and attempt<3:time.sleep(2**attempt);continue
-   if r.status_code==401:
-    try:reason=str(r.json().get('reason','SIGNATURE_REJECTED'))
-    except ValueError:reason='GATEWAY_AUTH_REJECTED'
-    raise RuntimeError('Research publisher authentication failed: '+reason+'; signing key '+account['private_key_id'])
-   check(r)
-   if r.json().get('ok') is not True:raise RuntimeError('Research publisher did not confirm storage')
-   return
- for month in months:
-  payload=compact([r for r in rows if str(r[1]).startswith(month)],month)
-  if len(json.dumps(payload).encode())>3800000:raise ValueError('Comparison month snapshot too large; previous snapshot retained')
-  send(payload)
- payload={'kind':'index','version':VERSION,'months':index_months,'start':START,'eligibleDays':sum(str(r[11]).upper()=='TRUE' for r in contexts if len(r)>13 and r[2]==VERSION),'eventScope':RBI_SCOPE,'eventSource':RBI_SOURCE,'updatedAt':dt.datetime.now(IST).isoformat()}
- send(payload)
-
 def comparison_sheet(book):
  from gspread.exceptions import WorksheetNotFound
  try:ws=book.worksheet('Research Comparisons')
@@ -146,27 +118,24 @@ def month_rows(ws,month):
 def main():
  import gspread
  from google.oauth2.service_account import Credentials
- p=argparse.ArgumentParser();p.add_argument('--setup-only',action='store_true');p.add_argument('--publish-only',action='store_true');args=p.parse_args();now=dt.datetime.now(IST);day=now.date().isoformat()
+ p=argparse.ArgumentParser();p.add_argument('--setup-only',action='store_true');args=p.parse_args();now=dt.datetime.now(IST);day=now.date().isoformat()
  from sheets_resilience import ResilientHTTPClient
  client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets']),http_client=ResilientHTTPClient);client.set_timeout((3,15));book=client.open_by_key(BOOK);writer=EvidenceWriter(book)
  outws=comparison_sheet(book);contextws,prior_context=writer.sheet('Comparison Market Regimes',CONTEXT_HEADERS)
  if args.setup_only:print('Comparison schemas ready; no broker requests or baseline edits');return
- if args.publish_only:
-  months=sorted({str(r[1])[:7] for r in prior_context[1:] if len(r)>2 and r[2]==VERSION})
-  for month in months:publish(month_rows(outws,month),prior_context[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
-  print('Saved comparison snapshots published; no broker calls or baseline writes');return
  if day<START:print('Comparison collection starts '+START+'; no historical results invented');return
  from market_calendar import session_allowed
  allowed,reason=session_allowed(day)
  if not allowed:print('SKIPPED '+reason);return
  if now.time().replace(tzinfo=None)<dt.time(16,7):raise ValueError('Comparison run is post-session only')
- response=book.values_batch_get([f"'{t} Logs'!A1:{'AE' if t in FIXED else 'AC'}5000" for t in TABS]+[f"'{t}'!A1:CE1000" for t in TABS],params={'valueRenderOption':'UNFORMATTED_VALUE'})['valueRanges']
+ from fixed_sheet_store import read_studies
+ summaries,logsets=read_studies(book,TABS)
  cases=[];symbols=set();wing_keys=set();baseline_ok=True
  for i,t in enumerate(TABS):
-  family='Fixed Entry' if t in FIXED else t.split(' - ')[0];choice=CHOICES[FIXED.index(t)] if t in FIXED else t.split(' - ')[1];data=response[i].get('values',[])
+  family='Fixed Entry' if t in FIXED else t.split(' - ')[0];choice=CHOICES[FIXED.index(t)] if t in FIXED else t.split(' - ')[1];data=logsets[t]
   if t in FIXED and data and 'Run Type' in data[0]:
    runidx=data[0].index('Run Type');data=[data[0]]+[r for r in data[1:] if len(r)>runidx and r[runidx]=='SCHEDULED PAPER']
-  raw=cycles_for(t,data,day);summary=[r for r in records(response[i+9].get('values',[])) if r.get('Date')==day];ready=len(summary)==1 and str(summary[0].get('Run Status' if t in FIXED else 'Status','')).upper()=='COMPLETED'
+  raw=cycles_for(t,data,day);summary=[r for r in records(summaries[t]) if r.get('Date')==day];ready=len(summary)==1 and str(summary[0].get('Run Status' if t in FIXED else 'Status','')).upper()=='COMPLETED'
   if summary and re.search(r'reconstruct|backfill|user-supplied|1m OHLC|CHECK EXIT TICK AGE',str(summary[0].get('Entry Data Status',''))+' '+str(summary[0].get('Data Status','')),re.I):ready=False
   entry_vix=summary[0].get('Vix at 09:30 AM' if t in FIXED else 'India VIX') if summary else None
   try:entry_vix=float(entry_vix)
@@ -201,7 +170,6 @@ def main():
  c=[VERSION+'|'+day,day,VERSION,context.get('regime','Unknown'),context.get('efficiency',''),context.get('gap_pct',''),context.get('gap_direction','Unknown'),context.get('prior_vix_20',''),context.get('event_day') if context.get('event_day') is not None else '',RBI_SCOPE,RBI_SOURCE,baseline_ok,phase,cohort or '',now.isoformat(),'; '.join(notes)]
  writer.save('Comparison Market Regimes',CONTEXT_HEADERS,[c],update=True)
  Path('comparison_report').mkdir(exist_ok=True);Path('comparison_report/report.json').write_text(json.dumps({'date':day,'version':VERSION,'baselineComplete':baseline_ok,'phase':phase,'captureSources':list(captures),'notes':notes,'rows':rows,'comparisonEvidence':evidence}),encoding='utf-8')
- publish(month_rows(outws,day[:7]),contextws.get_all_values()[1:],os.environ.get('STRADDLE_DASHBOARD_TOKEN',''))
  print(json.dumps({'date':day,'rows':len(rows),'baselineComplete':baseline_ok,'phase':phase,'unavailable':sum(r[7]=='UNAVAILABLE' for r in rows)}))
 if __name__=='__main__':main()
 

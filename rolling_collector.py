@@ -107,14 +107,6 @@ def main():
    evidence.save('Delta Measurements',DELTA_HEADERS,delta_evidence,update=True)
    evidence.save('Execution Measurements',EXEC_HEADERS,execution_evidence)
   except Exception as error:print('Measurement checkpoint pending:',type(error).__name__)
-  dashboard=os.environ.get('STRADDLE_DASHBOARD_TOKEN','')
-  if dashboard:
-   import requests
-   for name,_ in summaries:
-    for tab in [name,name+' Logs']:
-     payload={'spreadsheetId':BOOK,'sheet':tab,'values':store.snapshot(tab)}
-     result=requests.post('https://nifty-straddle-lab.cosmicbay1.chatgpt.site/api/sync',json=payload,headers={'OAI-Sites-Authorization':'Bearer '+dashboard},timeout=12)
-     if result.status_code!=200:print('Dashboard sync pending:',tab,result.status_code)
  save_thread=None;save_errors=[]
  def save_background():
   try:persist()

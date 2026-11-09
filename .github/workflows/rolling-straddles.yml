@@ -46,7 +46,6 @@ jobs:
     env:
       FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
       SETUP_ONLY: ${{ inputs.setup_only || 'false' }}
     steps:
       - uses: actions/checkout@v4

@@ -18,4 +18,5 @@ short_strangle_output/
 
 short-term-report/
 .short-term-test-deps/
+outputs/
 short-term-fixture*.log

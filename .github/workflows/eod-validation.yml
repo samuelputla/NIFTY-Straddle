@@ -5,10 +5,6 @@ on:
     - cron: '37 10 * * 1-5'
   workflow_dispatch:
     inputs:
-      publish_only:
-        description: Republish saved comparison Sheets only; no market downloads or baseline writes
-        type: boolean
-        default: false
       audit_date:
         description: Optional past IST session date YYYY-MM-DD; blank audits today after 16:07
         type: string
@@ -20,7 +16,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    if: ${{ !inputs.publish_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -57,7 +52,6 @@ jobs:
     env:
       FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      STRADDLE_DASHBOARD_TOKEN: ${{ secrets.STRADDLE_DASHBOARD_TOKEN }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -69,13 +63,8 @@ jobs:
         run: |
           python test_comparisons.py
           python test_comparison_reliability.py
-      - name: Compute separate comparison rows and publish research snapshot
-        run: |
-          if [ "${{ inputs.publish_only }}" = "true" ]; then
-            python -u comparison_runner.py --publish-only
-          else
-            python -u comparison_runner.py
-          fi
+      - name: Compute and save separate comparison rows to Sheets
+        run: python -u comparison_runner.py
       - name: Preserve comparison evidence
         if: always()
         uses: actions/upload-artifact@v4

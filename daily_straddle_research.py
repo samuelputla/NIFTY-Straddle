@@ -25,7 +25,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 IST = ZoneInfo("Asia/Kolkata")
 BOOK = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
-CORE = "Current Week Expiry Logs"
+CORE = "Short Straddle Logs"
 SUMMARY = "Daily Straddle Research"
 EVENTS = "Daily Straddle Research Events"
 INDEX, VIX = "NSE:NIFTY50-INDEX", "NSE:INDIAVIX-INDEX"
@@ -331,14 +331,14 @@ class Recorder:
                         self.final_ready.wait(20)
                         if not self.final_ready.is_set():
                             break
-                    values = [] if self.stop.is_set() else core.get("A1:AC1000")  # read only
+                    values = [] if self.stop.is_set() else core.get_all_values()  # read only
                     if values:
                         headers = values[0]
                         required = {"Date", "SL %", "CE Symbol", "PE Symbol", "Run Type"}
                         if not required.issubset(headers):
                             raise ValueError("Core log schema mismatch; refused guessed columns")
                         rows = [dict(zip(headers, row)) for row in values[1:] if row]
-                        rows = [r for r in rows if r.get("Date") == self.date and r.get("Run Type") == "SCHEDULED PAPER"]
+                        rows = [r for r in rows if r.get("Expiry Choice") == "Current Week" and r.get("Date") == self.date and r.get("Run Type") == "SCHEDULED PAPER"]
                         if not self.stop.is_set():
                             self.emit("core", rows)
                     with self.lock:
