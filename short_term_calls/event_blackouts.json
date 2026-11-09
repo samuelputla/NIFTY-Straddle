@@ -1,0 +1,14 @@
+{
+  "coverage": "Limited, manually verified official event exclusions. No complete news or earnings feed is claimed.",
+  "events": [
+    {
+      "symbol": "HAL",
+      "from": "2026-11-11",
+      "through": "2026-11-12",
+      "event_date": "2026-11-12",
+      "reason": "Quarterly results board meeting",
+      "source": "https://www.nseindia.com/companies-listing/corporate-filings-event-calendar?symbol=HAL&tabIndex=equity",
+      "verified_on": "2026-11-09"
+    }
+  ]
+}

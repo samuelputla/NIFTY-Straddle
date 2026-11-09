@@ -65,6 +65,33 @@ class History:
                         'candles':raw,'sha256':digest(raw)}),encoding='utf-8')
         return clean
 
+    def daily(self,symbol,through):
+        """A coherent daily series; no option collectors or desktop broker sessions."""
+        delay=2.1-(time.monotonic()-self.previous)
+        if delay>0:time.sleep(delay)
+        self.previous=time.monotonic()
+        params={'symbol':symbol,'resolution':'D','date_format':'1',
+                'range_from':str(through-timedelta(days=365)),'range_to':str(through),'cont_flag':'0'}
+        try:r=self.http.get(self.url,params=params,timeout=(5,25))
+        except Exception:raise DataUnavailable('FYERS daily transport unavailable') from None
+        if r.status_code in (401,403):raise DataUnavailable('FYERS authentication unavailable')
+        if r.status_code==429:raise DataUnavailable('FYERS rate limit; stopped without retry')
+        if r.status_code!=200:raise DataUnavailable('FYERS daily HTTP '+str(r.status_code))
+        try:body=r.json()
+        except Exception:raise DataUnavailable('FYERS daily non-JSON response') from None
+        if not isinstance(body,dict):raise DataUnavailable('FYERS malformed daily response')
+        if body.get('code') in (-429,429,-360,'429','-429','-360'):
+            raise DataUnavailable('FYERS rate limit; stopped without retry')
+        if body.get('s')!='ok':raise DataUnavailable('FYERS daily data unavailable')
+        from .swing import daily_rows
+        try:rows=daily_rows(body.get('candles'),through)
+        except (ValueError,TypeError,KeyError):raise DataUnavailable('FYERS daily candle validation failed') from None
+        safe=symbol.replace(':','_').replace('/','_')
+        (self.output/(safe+'-D-'+str(through)+'.json')).write_text(json.dumps(
+            {'source':'FYERS','params':params,'fetched_at':datetime.now(IST).isoformat(),
+             'sha256':digest(body['candles']),'candles':body['candles']}),encoding='utf-8')
+        return rows
+
 
 def bhavcopy(day,output):
     import requests

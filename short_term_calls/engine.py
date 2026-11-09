@@ -10,7 +10,7 @@ try:
     IST = ZoneInfo('Asia/Kolkata')
 except ZoneInfoNotFoundError:
     IST = timezone(timedelta(hours=5,minutes=30), 'IST')
-VERSION = 'short-term-paper-v2-unit-share'
+VERSION = 'short-term-paper-v3-swing-radar'
 HOLIDAYS = {'2026-10-20', '2026-11-10', '2026-11-24', '2026-12-25'}
 FIRST, LAST = date(2026, 10, 7), date(2026, 12, 31)
 
@@ -63,6 +63,8 @@ def validate_plan(p):
     if not 0 < prices[0] < prices[1] <= prices[2] <= prices[3] < prices[4] < prices[5]:
         raise ValueError('Invalid long levels')
     if p['policy']!='Full Exit At T1': raise ValueError('Unimplemented exit policy')
+    if p.get('entry_rule','Breakout Retest Confirmation') not in ('Breakout Retest Confirmation','Breakout Confirmation'):
+        raise ValueError('Unimplemented entry rule')
     if p.get('quantity') is not None and (type(p['quantity']) is not int or p['quantity']<=0):
         raise ValueError('Invalid quantity')
     if p.get('total_costs') is not None and number(p['total_costs'])<0:
@@ -106,6 +108,7 @@ def replay(p, raw, as_of):
     # Cancellation starts with the first fully observable minute after issue,
     # even when the prospective signal window opens a few minutes later.
     monitor_start=stamp(p['issued_at']).replace(second=0,microsecond=0)+timedelta(minutes=1)
+    if p.get('monitor_from_start'):monitor_start=start
     stop,trigger,lo,hi,t1,t2=map(lambda k:number(p[k]),('stop','trigger','entry_min','entry_max','target_1','target_2'))
     rows=candles(raw,now)
     data={r[0]:r for r in rows}
@@ -115,7 +118,7 @@ def replay(p, raw, as_of):
     events=[]
     seen=set()
     def event(kind,at,price=None,detail=''):
-        key=digest([p['id'],kind,at])[:24]
+        key=digest([p['id'],kind,at]+([detail] if kind=='Coverage Gap' else []))[:24]
         if key in seen:return
         seen.add(key)
         events.append({'id':key,'call_id':p['id'],'kind':kind,'at':at,
@@ -212,6 +215,11 @@ def replay(p, raw, as_of):
             if close>trigger:
                 breakout=end;state='Waiting For Retest'
                 event('Breakout',end.isoformat(),close,'Completed 15-minute close strictly above trigger')
+                if p.get('entry_rule')=='Breakout Confirmation':
+                    confirm=end;state='Confirmed'
+                    event('Confirmation',end.isoformat(),close,'Frozen breakout-only rule; a later one-minute open inside band is still required')
+        elif p.get('entry_rule')=='Breakout Confirmation':
+            pass  # Frozen breakout-only confirmation remains eligible until deadline/cancellation.
         elif group[0][0]>=breakout:
             if min(x[3] for x in group)<=hi and max(x[2] for x in group)>=lo:
                 retest_bar_seen=True

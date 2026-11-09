@@ -35,11 +35,13 @@ class Store:
     def __init__(self,book):
         from sheets_resilience import RollingSheetStore
         self.book=book
-        titles={s.title for s in book.worksheets()}
+        self.sheets={s.title:s for s in book.worksheets() if s.title in SCHEMAS}
+        titles=set(self.sheets)
         for title,headers in SCHEMAS.items():
             if title not in titles:
                 sheet=book.add_worksheet(title,20000 if title==EVENTS else 5000,len(headers))
                 sheet.freeze(rows=1,cols=1)
+                self.sheets[title]=sheet
         class RawValuesBook:
             def values_batch_get(self,ranges):
                 return book.values_batch_get(ranges,params={'valueRenderOption':'UNFORMATTED_VALUE'})
@@ -48,6 +50,13 @@ class Store:
         for title in SCHEMAS:
             ids=[r[0] for r in self.cache.snapshot(title)[1:] if r and r[0]]
             if len(ids)!=len(set(ids)):raise ValueError('Duplicate records: '+title)
+
+    def room(self,title,additional=1):
+        sheet=self.sheets[title]
+        if not hasattr(sheet,'row_count'):return  # Minimal in-memory test adapter.
+        needed=len(self.cache.snapshot(title))+additional
+        if needed>sheet.row_count:
+            sheet.resize(rows=max(needed+100,sheet.row_count*2),cols=max(sheet.col_count,len(SCHEMAS[title])))
 
     def plans(self):
         plans=[]
@@ -75,6 +84,7 @@ class Store:
             return
         if p.get('status','Active')=='Active' and stamp(now)>=stamp(p['start_at']):
             raise ValueError('Late registration refused; a new prospective plan is required')
+        self.room(CALLS)
         self.cache.checkpoint([],[(CALLS,[row_for_plan(p,now)])])
 
     def register_many(self,plans,now):
@@ -89,7 +99,9 @@ class Store:
             if p.get('status','Active')=='Active' and stamp(now)>=stamp(p['start_at']):
                 raise ValueError('Late registration refused')
             rows.append(row_for_plan(p,now))
-        if rows:self.cache.checkpoint([],[(CALLS,rows)])
+        if rows:
+            self.room(CALLS,len(rows))
+            self.cache.checkpoint([],[(CALLS,rows)])
 
     def save_result(self,p,result):
         row=[p['id'],p['symbol'],p['type']]+[result[k] if result[k] is not None else '' for k in
@@ -109,6 +121,7 @@ class Store:
         for e in incoming:
             if e[0] in prior and [str(x) for x in prior[e[0]]]!=[str(x) for x in e]:
                 raise ValueError('Previously journaled event changed; provider revision requires review')
+        self.room(STATUS);self.room(EVENTS,len(incoming))
         self.cache.checkpoint([(STATUS,row)],[(EVENTS,incoming)])
 
     def generation_done(self,day):
@@ -116,13 +129,30 @@ class Store:
                    r[3] in ('Generated','No Qualified Calls','Capacity Full')
                    for r in self.cache.snapshot(RUNS)[1:])
 
+    def journal(self,subject,kind,at,detail,price=''):
+        """Append evidence versions; retries of identical observations are idempotent."""
+        detail=json.dumps(detail,sort_keys=True) if isinstance(detail,(dict,list)) else str(detail)
+        row=[digest([subject,kind,at,detail,price])[:24],subject,kind,at,price,detail]
+        if len(detail)>45000:raise ValueError('Journal cell exceeds safe evidence size')
+        self.room(EVENTS)
+        self.cache.checkpoint([],[(EVENTS,[row])])
+
+    def prepared(self,day):
+        return any(len(r)>2 and r[1]==day and r[2]=='Preparation Complete' for r in self.cache.snapshot(EVENTS)[1:])
+
+    def journal_once(self,subject,kind,at,detail):
+        if any(len(r)>2 and r[1]==subject and r[2]==kind for r in self.cache.snapshot(EVENTS)[1:]):return
+        self.journal(subject,kind,at,detail)
+
     def results(self):
         out={}
         for r in self.cache.snapshot(STATUS)[1:]:
             if not r:continue
             def value(i):return r[i] if len(r)>i and r[i]!='' else None
             out[r[0]]={'call_id':r[0],'status':value(3),'entry_at':value(7),'entry_price':value(8),
-                       'exit_at':value(9),'gross_pnl':value(13),'net_pnl':value(14),'last_price':value(27),'as_of':value(20)}
+                       'exit_at':value(9),'exit_price':value(10),'exit_reason':value(11),
+                       'gross_pnl':value(13),'net_pnl':value(14),'last_price':value(27),'as_of':value(20),
+                       'gross_return_pct':value(23),'realized_r':value(31),'missing_minutes':value(19)}
         return out
 
     def portfolio(self,s):
@@ -138,4 +168,5 @@ class Store:
 
     def run(self,run_id,at,stage,status,count,detail,url,version):
         row=[run_id+'-'+stage,at,stage,status,count,detail,url,version]
+        self.room(RUNS)
         self.cache.checkpoint([(RUNS,row)],[])

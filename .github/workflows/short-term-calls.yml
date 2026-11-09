@@ -2,9 +2,14 @@ name: Short Term Calls And Tracking
 run-name: Short Term Paper Research · ${{ github.event_name }}
 on:
   schedule:
-    # Every 15 minutes from 09:35 to 16:20 IST. Generation window 09:47–11:00;
-    # normally the 09:50 run issues all qualifying Intraday and Swing paper calls.
-    - cron: '5,20,35,50 4-10 * * 1-5'
+    # Prepare at 08:50 and 09:05 IST, seal the next session after 18:05 IST.
+    # Track every 15 minutes from 09:20 through 15:35 IST. GitHub timing is best effort.
+    - cron: '20,35 3 * * 1-5'
+    - cron: '50 3 * * 1-5'
+    - cron: '5,20,35,50 4-9 * * 1-5'
+    - cron: '5 10 * * 1-5'
+    - cron: '35 10 * * 1-5'
+    - cron: '35 12 * * 1-5'
   workflow_dispatch:
     inputs:
       connection_check:
@@ -12,7 +17,11 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, short-term-call-tracking]
+    branches: [main]
+    paths:
+      - short_term_calls/**
+      - .github/workflows/short-term-calls.yml
+  pull_request:
     paths:
       - short_term_calls/**
       - .github/workflows/short-term-calls.yml
@@ -43,10 +52,10 @@ jobs:
           trap 'kill "$fixture_pid"' EXIT
           python -m short_term_calls.tests.http_probe http://127.0.0.1:4922
       - name: Verify Connection After Installation
-        if: github.event_name == 'push' || inputs.connection_check == true
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.connection_check == true)
         run: python -m short_term_calls.run --connection-check
       - name: Generate Calls And Track All Frozen Plans
-        if: github.event_name != 'push' && inputs.connection_check != true
+        if: github.event_name != 'push' && github.event_name != 'pull_request' && inputs.connection_check != true
         run: python -m short_term_calls.run
       - name: Preserve Calls And Candle Evidence
         if: always()

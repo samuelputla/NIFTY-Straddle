@@ -14,15 +14,32 @@
     "post_exit_sessions": 5
   },
   "future_trade_selection": {
-    "max_intraday": 3,
-    "max_swing": 3,
+    "max_intraday": 0,
+    "max_swing": null,
     "live_orders_enabled": false
   },
-  "paper_scope": "Track every qualifying setup at exactly one share; select top three Intraday and top three Swing daily. Gross rupee and percentage returns; unknown costs are not assumed zero.",
+  "paper_scope": "Every qualifying swing setup is logged and tracked at exactly one share, without a daily call quota. Unfunded setups remain one-share research observations. Frozen existing calls retain original rules. Gross returns; net costs unknown.",
   "portfolio": {
     "initial_capital": 300000,
     "quantity_mode": "one_share",
-    "daily_intraday": 3,
-    "daily_swing": 3
+    "daily_intraday": 0,
+    "daily_swing": null
+  },
+  "swing": {
+    "min_price": 50,
+    "min_turnover_cr": 100,
+    "rsi_min": 50,
+    "rsi_max": 68,
+    "min_rvol": 1,
+    "max_extension_pct": 8,
+    "min_excess20": -5,
+    "trigger_buffer_pct": 0.1,
+    "entry_band_pct": 0.25,
+    "stop_buffer_pct": 0.1,
+    "min_risk_pct": 1,
+    "max_risk_pct": 5.5,
+    "validity_calendar_days": 14,
+    "radar_limit": 0,
+    "benchmark": "NSE:NIFTY50-INDEX"
   }
 }
