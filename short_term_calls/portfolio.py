@@ -92,6 +92,7 @@ def summary(plans,results,settings,now):
 
 def select_one_share(plans,existing,results,settings):
     limits=settings.get('daily_selection_counts',{'Intraday':settings.get('daily_intraday',3),'Swing':settings.get('daily_swing',3)})
+    limits={kind:float('inf') if count is None else count for kind,count in limits.items()}
     used={'Intraday':set(),'Swing':set()};counts={'Intraday':0,'Swing':0}
     account=summary_one_share(existing,results,settings,'')
     cash=number(account['available_cash'])
@@ -103,12 +104,12 @@ def select_one_share(plans,existing,results,settings):
     ordered=sorted(plans,key=lambda p:(-p['portfolio_rank_score'],p['symbol'],p['type']))
     for rank,p in enumerate(ordered,1):
         kind=p['type'];p['portfolio_rank']=rank;p['portfolio_selected']=False
-        reason='Outside daily top three for '+kind
+        reason='Outside configured daily selections for '+kind
         if counts[kind]<limits[kind] and p['symbol'] not in used[kind]:
             if number(p['entry_max'])<=cash:
                 p['portfolio_selected']=True;counts[kind]+=1;used[kind].add(p['symbol'])
                 cash-=number(p['entry_max'])
-                reason='Selected prospectively in daily top three '+kind+'; exactly one share'
+                reason='Selected prospectively within paper cash; exactly one share; '+kind
             else:reason='Insufficient unleveraged paper cash for one share'
         p['portfolio_selection_reason']=reason
     return ordered
@@ -135,4 +136,4 @@ def summary_one_share(plans,results,settings,now):
         'unrealized_gross':str(unrealized),'deployed':str(deployed),'reserved':str(reserved),
         'available_cash':str(capital+realized-deployed-reserved),'selected_calls':selected,
         'review_calls':','.join(sorted(set(unknown))),'as_of':now,
-        'cost_note':'Exactly one share per setup. Gross price returns; fees and slippage excluded, net left unknown. Top three Intraday and top three Swing selected daily. ROI denominator Rs300000.'}
+        'cost_note':'Exactly one share per setup. Gross price returns; fees and slippage excluded, net left unknown. Daily selections: '+str(settings.get('daily_intraday',3))+' Intraday and '+str(settings.get('daily_swing',3))+' Swing. ROI denominator Rs300000.'}
