@@ -1,6 +1,0 @@
-simulation: comparison-publisher
-routing: path
-mocks:
-  - routeKey: publisher
-    path: ../mocks/comparison-publisher/config.yaml
-

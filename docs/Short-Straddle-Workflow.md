@@ -38,9 +38,9 @@ The workflow's existing concurrency locks prevent duplicate instances of each ex
 
 ## Downstream Readers And Dashboard
 
-Daily research reads Current Week rows from the consolidated logs. End-of-day validation and isolated comparisons split both shared tabs by Expiry Choice. Automated start checks read the shared summary. Execution measurement and comparison-capture artifacts remain enabled.
+End-of-day validation splits both shared tabs by Expiry Choice. Automated start checks read the shared summary. Daily Straddle Research and the Execution Measurements sheet are retired. Local execution-evidence artifacts remain enabled.
 
-The retiring dashboard is disconnected: its scheduled sync workflow, fixed-entry sync step, rolling publisher, comparison publisher, and workflow token references were removed. Collectors, comparisons, and evidence continue saving to Sheets/artifacts. No new dashboard was created and the old hosted website was not deleted. Historical GitHub runs/commits can still contain the retired URLs.
+The retiring dashboard is disconnected: its scheduled sync workflow, fixed-entry sync step, rolling publisher, comparison publisher, and workflow token references were removed. Strategy collectors and execution evidence continue saving to Sheets/artifacts. Isolated comparison capture, processing, publishing, and the two comparison sheets are retired. No new dashboard was created and the old hosted website was not deleted. Historical GitHub runs/commits can still contain the retired URLs.
 
 ## Data Quality Limits
 
