@@ -34,6 +34,8 @@ class TimingRegressionTests(unittest.TestCase):
              'stop_event':threading.Event(),'state_lock':threading.RLock(),
              'ce_sl_values':[110],'pe_sl_values':[110],'SL_PERCENTAGES':[10],
              'pending_scenario_updates':set(),
+             'execution_measurements':[], 'execution_row':lambda *args:args,
+             'capture_time':now, 'ce_symbol':'CE', 'pe_symbol':'PE',
              'state':{'ce_ltp':100,'ce_high':100,'ce_low':100,'scenarios':{10:scenario}}}
         load_function('update_summary_after_event',env)
         load_function('handle_sl',env)('CE',115)
@@ -46,6 +48,8 @@ class TimingRegressionTests(unittest.TestCase):
         applied=datetime(2026,10,15,9,30,8)
         done=threading.Event();done.set()
         env={'collect_ready_requests':collect_ready_requests,'time_module':time,
+             'poll_previous_history':lambda:False, 'metadata_started':True,
+             'metadata_attempts':1, 'metadata_next_retry':0,
              'metadata_deadline':time.monotonic()+15,
              'metadata_requests':{'VIX':(done,{'value':({'VIX':{'lp':14.9}},retrieved)}),
                                   'OI':(done,{'value':({'s':'ok','data':{'callOi':100,'putOi':120}},retrieved)})},

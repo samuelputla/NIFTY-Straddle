@@ -193,8 +193,9 @@ def main():
  import gspread
  from google.oauth2.service_account import Credentials
  client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']));client.set_timeout((3,15));book=client.open_by_key(BOOK)
- ranges=[f"'{t}'!A1:{'CE' if t in FIXED else 'AK'}1000" for t in TABS]+[f"'{t} Logs'!A1:{'AE' if t in FIXED else 'AC'}5000" for t in TABS]
- response=book.values_batch_get(ranges,params={'valueRenderOption':'UNFORMATTED_VALUE'});sets=response['valueRanges'];summaries={t:sets[i].get('values',[]) for i,t in enumerate(TABS)};logs={t:sets[i+9].get('values',[]) for i,t in enumerate(TABS)}
+ from fixed_sheet_store import read_studies
+ summaries,logs=read_studies(book,TABS)
+
  Path(args.out).mkdir(parents=True,exist_ok=True);Path(args.out,'source-sheet-snapshot.json').write_text(json.dumps({'summaries':summaries,'logs':logs}),encoding='utf-8')
  history=History(os.environ['FYERS_ACCESS_TOKEN'],Path(args.out,'history'));results=[];expiry_map={};master_note=''
  try:expiry_map=master_expiries(day)

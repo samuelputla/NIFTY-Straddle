@@ -1,3 +1,4 @@
+from fixed_sheet_store import open_scoped, reserve_daily, appended_row
 """Monthly-expiry paper straddle: frozen core mechanics, separate state and worksheets.
 Baseline blob: 74d1c9a7dec330a1411de852a4c3fda4e10e4dc7. No broker order APIs.
 """
@@ -39,8 +40,9 @@ CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SCENARIO_SHEET_NAME = "Monthly Expiry Logs"
-DAILY_SHEET_NAME = "Monthly Expiry"
+SCENARIO_SHEET_NAME = "Short Straddle Logs"
+DAILY_SHEET_NAME = "Short Straddle Summary"
+EXPIRY_CHOICE = 'Monthly'
 
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
 SETUP_ONLY = os.getenv("SETUP_ONLY", "false").strip().lower() == "true"
@@ -122,55 +124,7 @@ spreadsheet = gc.open_by_key(SPREADSHEET_ID)
 
 
 def ensure_worksheet(title, headers, rows=1000):
-    titles = {item.title for item in spreadsheet.worksheets()}
-    if title in titles:
-        sheet = spreadsheet.worksheet(title)
-    else:
-        sheet = spreadsheet.add_worksheet(
-            title=title,
-            rows=rows,
-            cols=len(headers),
-        )
-
-    existing_values = sheet.get_all_values()
-    existing_headers = existing_values[0] if existing_values else []
-    if not existing_headers:
-        last_col = column_letter(len(headers))
-        sheet.update(
-            range_name=f"A1:{last_col}1",
-            values=[headers],
-            value_input_option="RAW",
-        )
-    elif existing_headers != headers:
-        has_data_rows = any(
-            any(str(cell).strip() for cell in row)
-            for row in existing_values[1:]
-        )
-        if len(existing_headers) < len(headers) and existing_headers == headers[:len(existing_headers)]:
-            # Append new columns without changing historical cells; old rows stay blank there.
-            sheet.resize(
-                rows=max(sheet.row_count, len(existing_values)),
-                cols=max(sheet.col_count, len(headers)),
-            )
-            last_col = column_letter(len(headers))
-            sheet.update(
-                range_name=f"A1:{last_col}1",
-                values=[headers],
-                value_input_option="RAW",
-            )
-        elif len(existing_headers) == len(headers) and not has_data_rows:
-            # Safe schema-label migration while a sheet contains headers only.
-            last_col = column_letter(len(headers))
-            sheet.update(
-                range_name=f"A1:{last_col}1",
-                values=[headers],
-                value_input_option="RAW",
-            )
-        else:
-            raise RuntimeError(
-                f"Unexpected headers in {title}; refusing to change existing data"
-            )
-    return sheet
+    return open_scoped(spreadsheet, title, headers, EXPIRY_CHOICE)
 
 
 def column_letter(number):
@@ -554,15 +508,7 @@ def make_scenario_row(percent):
 
 
 def append_scenario_rows(rows):
-    existing = scenario_sheet.get_all_values()
-    first_row = max(2, len(existing) + 1)
-    last_row = first_row + len(rows) - 1
-    scenario_sheet.update(
-        range_name=f"A{first_row}:{column_letter(len(SCENARIO_HEADERS))}{last_row}",
-        values=rows,
-        value_input_option="RAW",
-    )
-    return first_row
+    return appended_row(scenario_sheet.append_rows(rows))
 
 
 def update_scenario_rows(percentages):
@@ -804,15 +750,7 @@ def close_at_end(end_dt):
 today = now_ist().date()
 daily_row_number = None
 if not TEST_MODE:
-    summary_rows = daily_sheet.get_all_values()
-    today_text = today.strftime("%Y-%m-%d")
-    for row_number, row in enumerate(summary_rows[1:], start=2):
-        if row and row[0] == today_text:
-            raise RuntimeError(
-                f"{DAILY_SHEET_NAME} already has a row for {today_text}; "
-                "refusing to duplicate the day's straddle"
-            )
-    daily_row_number = len(summary_rows) + 1
+    daily_row_number = reserve_daily(daily_sheet, today.isoformat(), DAILY_HEADERS)
 
 
 target_dt = datetime.combine(today, TARGET_TIME, tzinfo=IST)

@@ -9,7 +9,7 @@ from market_calendar import session_allowed
 IST=ZoneInfo('Asia/Kolkata');REPO='samuelputla/NIFTY-Straddle'
 BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 WORKFLOWS={
- 'straddle.yml':({'test_mode':'false','setup_only':'false'},['Current Week Expiry','Next Week Expiry','Monthly Expiry']),
+ 'straddle.yml':({'test_mode':'false','setup_only':'false'},['Short Straddle Summary']),
  'rolling-straddles.yml':({'setup_only':'false'},[f'{family} - {choice}' for family in ['Time Based','Delta Based'] for choice in ['Current Week','Next Week','Monthly']]),
  'daily-straddle-research.yml':({},['Daily Straddle Research'])}
 ACTIVE={'queued','in_progress','waiting','requested','pending'}
@@ -94,7 +94,7 @@ def main():
   client=gspread.authorize(Credentials.from_service_account_info(json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']));client.set_timeout((3,10));book=client.open_by_key(BOOK)
   def has_entry(workflow):
    for tab in WORKFLOWS[workflow][1]:
-    if any(r and r[0]==day for r in book.worksheet(tab).get('A2:A1000')):return True
+    if any(r and r[0]==day for r in book.worksheet(tab).get_all_values()[1:]):return True
    return False
   results=[safe_dispatch(api,w,inputs,day,has_entry) for w,(inputs,_) in WORKFLOWS.items()]
  Path('dispatch-report.json').write_text(json.dumps({'day':day,'kind':kind,'results':results},indent=2),encoding='utf-8')
