@@ -1,8 +1,8 @@
 """Shared fixed-entry tabs: expiry isolation and server-allocated append ranges."""
 import re
 
-SUMMARY = 'Short Straddle Summary'
-LOGS = 'Short Straddle Logs'
+SUMMARY = 'Straddle Fixed Summary'
+LOGS = 'Straddle Fixed Logs'
 CHOICES = ('Current Week', 'Next Week', 'Monthly')
 LEGACY = ('Current Week Expiry', 'Next Week Expiry', 'Monthly Expiry')
 

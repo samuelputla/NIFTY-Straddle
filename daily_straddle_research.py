@@ -25,7 +25,7 @@ from fyers_apiv3.FyersWebsocket import data_ws
 
 IST = ZoneInfo("Asia/Kolkata")
 BOOK = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
-CORE = "Short Straddle Logs"
+CORE = "Straddle Fixed Logs"
 SUMMARY = "Daily Straddle Research"
 EVENTS = "Daily Straddle Research Events"
 INDEX, VIX = "NSE:NIFTY50-INDEX", "NSE:INDIAVIX-INDEX"

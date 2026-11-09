@@ -40,8 +40,8 @@ CONTRACT_QTY = 65
 ROUND_TRIP_CHARGES_RUPEES = 150
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
-SCENARIO_SHEET_NAME = "Short Straddle Logs"
-DAILY_SHEET_NAME = "Short Straddle Summary"
+SCENARIO_SHEET_NAME = "Straddle Fixed Logs"
+DAILY_SHEET_NAME = "Straddle Fixed Summary"
 EXPIRY_CHOICE = 'Next Week'
 
 TEST_MODE = os.getenv("TEST_MODE", "false").strip().lower() == "true"
