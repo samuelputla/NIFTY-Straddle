@@ -9,6 +9,7 @@ from statistics import mean
 from xml.etree import ElementTree
 from email.utils import parsedate_to_datetime
 from .calendar import session, next_session
+from .research import diagnose, research_history
 from .core import IST, RULE, TOP, RULE_SPEC, digest, daily_features, intraday_features, screen, ranked, review_outcome
 from .adapters import Fyers, Sheets, Unavailable, public_get, fetch_universe
 
@@ -84,13 +85,11 @@ def evaluate(prior,rows,day,key):
         for p in forecast:
             symbol=p['Symbol'];r=by_symbol[symbol];selected=p['Selected'].lower()=='true'
             outcome=review_outcome(selected,ranks[symbol]);hits+=outcome=='HIT'
-            explanation=('Expected signal is not causal proof; review catalyst and session path' if outcome=='HIT' else
-                         'Compare frozen score and counterevidence with missed leaders; failure may be ranking rather than direction' if outcome=='FALSE POSITIVE' else
-                         'Compare stored feature/rank, data coverage and post-cutoff catalysts; predictability unresolved' if outcome=='MISSED LEADER' else
-                         'Non-leader control; retain to test pattern specificity')
+            diagnostic=diagnose(p,forecast,r,outcome)
+            explanation=json.dumps(diagnostic,sort_keys=True)
             reviews.append([key+':'+fid+':'+symbol,day,fid,symbol,selected,ranks[symbol],r['return'],r['gap'],r['intraday'],outcome,explanation,p['Rule Version']])
             if outcome in ('FALSE POSITIVE','MISSED LEADER'):
-                changes.append([key+':'+fid+':'+symbol,day,symbol,outcome,'Unresolved; compare frozen inputs with realized path',
+                changes.append([key+':'+fid+':'+symbol,day,symbol,outcome,json.dumps(diagnostic,sort_keys=True),
                                 'Replicated feature/catalyst evidence across controls and future sessions','PROPOSED REVIEW',p['Rule Version']])
         baseline={}
         for label,col in [('prior winners','Baseline Prior Winner Rank'),('momentum','Baseline Momentum Rank'),('sector','Baseline Sector Rank')]:
@@ -201,7 +200,11 @@ def execute(connection_check=False):
                      'relative_strength_nifty_20_pp':r['rs20'],'verified_evidence_count':len(r['evidence']),
                      'interpretation':'Observed technical context; causation and pre-session predictability unestablished'}
                     for r in ranked(rows,'return')[:TOP]]
-    findings={'leaders':[r['symbol'] for r in ranked(rows,'return')[:TOP]],'leader_context':leader_context,'next_candidates':[r['symbol'] for r in scoring[:TOP]],
+    history=research_history(sheet.records('Study Reviews'),reviews)
+    focused_reviews=[{'symbol':r[3],'outcome':r[9],'actual_rank':r[5],
+                      'return_pct':r[6],'analysis':json.loads(r[10])}
+                     for r in reviews if r[9]!='CONTROL']
+    findings={'research_history':history,'shortlist_review':focused_reviews,'leaders':[r['symbol'] for r in ranked(rows,'return')[:TOP]],'leader_context':leader_context,'next_candidates':[r['symbol'] for r in scoring[:TOP]],
               'evaluations':evaluation,'limitations':issues+['Exploratory price-volume-v1; no validated edge',
               'Industry peer basket is a proxy, not official sector index', 'Volume profile and VWAP approximated from 15-minute candles',
               'No automatic fundamental extraction or causal news verification; Study Evidence requires reviewed sources',
@@ -213,7 +216,8 @@ def execute(connection_check=False):
                           'target':target,'universe_scope':'current snapshot observed today; not a historical constituent reconstruction'})
     md=['# Nifty study',f'Session: {day}; target: {target}; frozen: {completed.isoformat()}',
         '## Actual leaders',', '.join(findings['leaders']),'## Observed leader context',json.dumps(leader_context,indent=2),'## Next-session paper candidates',', '.join(findings['next_candidates']),
-        '## Forecast evaluation',json.dumps(evaluation),'## Coverage and limitations',*['- '+x for x in findings['limitations']]]
+        '## Forecast evaluation',json.dumps(evaluation),'## Five picks versus actual top five',json.dumps(focused_reviews,indent=2),
+        '## Continuous research record',json.dumps(history,indent=2),'## Coverage and limitations',*['- '+x for x in findings['limitations']]]
     (OUT/'report.md').write_text('\n\n'.join(md),encoding='utf-8')
     sheet.publish(key,{'Study Observations':observations,'Study Forecasts':forecast,'Study Reviews':reviews,
                        'Study Evidence':news,'Study Changes':changes,'Study Runs':[[key,day,completed.isoformat(),'COMPLETED',50,target,RULE,input_hash,json.dumps(findings),run_url()]]})
@@ -254,3 +258,4 @@ def main():
 
 if __name__=='__main__':
     sys.exit(main())
+
