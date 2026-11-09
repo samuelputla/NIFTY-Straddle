@@ -1,5 +1,18 @@
 # Time Based and Delta Based paper challengers
 
+## Consolidated Sheets
+
+Time Based Summary, Time Based Logs, Delta Based Summary and Delta Based Logs
+are the four active tabs. Each combines Current Week, Next Week and Monthly.
+Filter Expiry Choice to select the expiry category; filter Expiry for an actual
+contract expiry date. Existing columns and paper strategy rules are unchanged.
+The twelve previous per-expiry tabs are retained as hidden migration history;
+collectors and reports use the four consolidated tabs. Summary rows are keyed by
+Date, Family and Expiry Choice; log rows retain their unique Event ID. Checkpoints
+reserve stable physical rows and retry the same cells, preserving expiry isolation.
+Startup refuses duplicate identities or unexpected schemas. Validation and comparison
+reports select each expiry from the consolidated data rather than the hidden history.
+
 Forward-only start: 29 October 2026. Existing Fixed Entry collectors and history are unchanged. Never place real broker orders. Every family has Current Week, Next Week and Monthly selectors. Exact contract symbols come from FYERS master and expiry metadata. Include actual expiry day; Next Week means one listed expiry after Current Week. Monthly uses actual futures expiry cross-verified in option metadata.
 
 Common rules: nearest 50-point ATM, 65 units per leg, 09:30 entry (09:35 latest), independent 10/15/20/25/30/35/40/45/50% stops, threshold paper fills, 15:00 final exit. Each SL scenario owns its own independent cycle history. New entries reset both stops. Rs150 combined round-trip assumed cost per cycle, maximum Rs450 for three cycles. Rs250000 capital is a comparison base, not guaranteed adequate margin. Quotes, Greeks, actual capture times and missed windows must not be backdated.

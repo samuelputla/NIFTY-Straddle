@@ -14,8 +14,8 @@ class ResilientHTTPClient(HTTPClient):
 
 class RollingSheetStore:
  """Single-writer cached ranges. Retry writes at identical cells after uncertain errors."""
- def __init__(self,book,schemas):
-  self.book=book;self.schemas=schemas
+ def __init__(self,book,schemas,row_key=None):
+  self.book=book;self.schemas=schemas;self.row_key=row_key or (lambda n,r:r[0])
   ranges=["'"+n.replace("'","''")+"'!A1:"+col(len(h)) for n,h in schemas.items()]
   result=book.values_batch_get(ranges)
   values=result.get('valueRanges',[])
@@ -24,9 +24,8 @@ class RollingSheetStore:
   for n,h in schemas.items():
    if not self.rows[n]:self.rows[n]=[h];book.values_batch_update({'valueInputOption':'RAW','data':[{'range':quoted(n)+'!A1','values':[h]}]})
    if self.rows[n][0]!=h:raise RuntimeError('Unexpected schema: '+n)
-   if n.endswith(' Logs'):
-    ids=[r[0] for r in self.rows[n][1:] if r and r[0]]
-    if len(ids)!=len(set(ids)):raise RuntimeError('Duplicate existing event IDs: '+n)
+   ids=[self.row_key(n,r) for r in self.rows[n][1:] if r and r[0]]
+   if len(ids)!=len(set(ids)):raise RuntimeError('Duplicate existing row identities: '+n)
  def check_day(self,day):
   for n,rows in self.rows.items():
    if not n.endswith(' Logs') and any(r and r[0]==day for r in rows[1:]):
@@ -34,12 +33,14 @@ class RollingSheetStore:
  def checkpoint(self,summaries,logsets):
   updates=[]
   for n,incoming in [(n,[r]) for n,r in summaries]+logsets:
-   rows=self.rows[n];positions={r[0]:i for i,r in enumerate(rows) if r and r[0]}
+   rows=self.rows[n];positions={self.row_key(n,r):i for i,r in enumerate(rows[1:],1) if r and r[0]}
    seen=set()
    for row in incoming:
-    if len(row)!=len(self.schemas[n]) or not row[0] or row[0] in seen:raise RuntimeError('Invalid generated row: '+n)
-    seen.add(row[0]);i=positions.get(row[0])
-    if i is None:i=len(rows);rows.append(list(row));positions[row[0]]=i
+    if len(row)!=len(self.schemas[n]) or not row[0]:raise RuntimeError('Invalid generated row: '+n)
+    identity=self.row_key(n,row)
+    if identity in seen:raise RuntimeError('Duplicate generated row: '+n)
+    seen.add(identity);i=positions.get(identity)
+    if i is None:i=len(rows);rows.append(list(row));positions[identity]=i
     else:rows[i]=list(row)
     updates.append({'range':quoted(n)+'!A'+str(i+1),'values':[row]})
   # Cache reserves stable row locations before sending: uncertain responses cannot append duplicates.

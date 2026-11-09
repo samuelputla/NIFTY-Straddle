@@ -10,7 +10,7 @@ IST=ZoneInfo('Asia/Kolkata');REPO='samuelputla/NIFTY-Straddle'
 BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 WORKFLOWS={
  'straddle.yml':({'test_mode':'false','setup_only':'false'},['Straddle Fixed Summary']),
- 'rolling-straddles.yml':({'setup_only':'false'},[f'{family} - {choice}' for family in ['Time Based','Delta Based'] for choice in ['Current Week','Next Week','Monthly']]),
+ 'rolling-straddles.yml':({'setup_only':'false'},['Time Based Summary','Delta Based Summary']),
  'daily-straddle-research.yml':({},['Daily Straddle Research'])}
 ACTIVE={'queued','in_progress','waiting','requested','pending'}
 class GitHub:

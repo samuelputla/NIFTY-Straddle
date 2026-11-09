@@ -61,6 +61,7 @@ jobs:
           python test_rolling.py
           python test_quote_quality.py
           python test_measurements.py
+          python -m unittest test_rolling_sheet_store test_sheets_resilience test_fixed_sheet_store
       - name: Track six isolated paper challengers
         run: python -u rolling_collector.py
       - name: Preserve observed state for recovery

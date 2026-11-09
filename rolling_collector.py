@@ -4,7 +4,8 @@ from pathlib import Path
 from datetime import datetime,time as dt_time
 from zoneinfo import ZoneInfo
 from rolling_engine import Study,CHOICES,SUMMARY_HEADERS,LOG_HEADERS,START_DATE,good
-from sheets_resilience import ResilientHTTPClient,RollingSheetStore
+from sheets_resilience import ResilientHTTPClient
+from rolling_sheet_store import ConsolidatedRollingStore
 from quote_quality import quote_prices
 from comparison_capture import Capture
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
@@ -25,14 +26,8 @@ def main():
  client=gspread.authorize(Credentials.from_service_account_info(json.loads(secret),scopes=['https://www.googleapis.com/auth/spreadsheets']),http_client=ResilientHTTPClient)
  client.set_timeout((3,8));book=client.open_by_key(BOOK)
  evidence=EvidenceWriter(book);sample_seen=set();sample_pending=[]
- sheets={};schemas={};existing={w.title:w for w in book.worksheets()}
- for family in ['Time Based','Delta Based']:
-  for choice in CHOICES:
-   name=title(family,choice)
-   for name,headers in [(name,SUMMARY_HEADERS),(name+' Logs',LOG_HEADERS)]:
-    sheets[name]=existing.get(name) or book.add_worksheet(name,rows=2000,cols=len(headers));schemas[name]=headers
- store=RollingSheetStore(book,schemas)
- if os.environ.get('SETUP_ONLY')=='true':print('Six challenger tabs and logs verified; no market requests');return
+ store=ConsolidatedRollingStore(book)
+ if os.environ.get('SETUP_ONLY')=='true':print('Four consolidated challenger tabs verified; no market requests');return
  if not os.environ.get('GITHUB_RUN_ID'):raise RuntimeError('Normal tracking runs only through the concurrency-protected GitHub workflow')
  day=now().date().isoformat()
  if day<START_DATE or now().weekday()>4 or day in {'2026-11-10','2026-11-24','2026-12-25'}:print('No configured normal session');return
