@@ -101,7 +101,31 @@ try:
         for side in ('CE', 'PE'):
             if row.get(side + ' SL Hit') == 'HIT' and (not row.get(side + ' Hit Time') or not row.get(side + ' Exit Time')):
                 groups[row[side + ' Symbol']].append((rowno, row, side))
+    contract_cache = {}
     for symbol, items in sorted(groups.items()):
+        legacy_symbol = symbol
+        expiry = datetime.strptime(items[0][1]['Expiry'], '%d-%m-%Y').date().isoformat()
+        if expiry not in contract_cache:
+            reply = session.get('https://api-t1.fyers.in/data/history/fno/expired/underlying-symbols', params={'symbol': 'NSE:NIFTY50-INDEX', 'expiry_date': expiry}, timeout=(4,25), allow_redirects=False)
+            body = reply.json()
+            (OUT / ('contracts_' + expiry + '.json')).write_text(json.dumps(body), encoding='utf-8')
+            data = body.get('data', {})
+            contracts = data.get('contracts', {}).get('options', []) if body.get('s') == 'ok' else []
+            if data.get('expiry_date') != expiry:
+                contracts = []
+            contract_cache[expiry] = contracts
+            report['requests'].append({'endpoint': 'expired contract lookup', 'expiry': expiry, 'http': reply.status_code, 'code': body.get('code'), 'status': body.get('s'), 'contract_count': len(contracts)})
+            time.sleep(1.3)
+        contracts = contract_cache[expiry]
+        strike = str(int(float(items[0][1]['ATM'])))
+        option_type = items[0][2]
+        matches = [x for x in contracts if isinstance(x,str) and x.startswith('NSE:NIFTY') and x.endswith(strike + option_type)]
+        if symbol not in contracts:
+            if len(matches) != 1:
+                report['unavailable'].append({'symbol':symbol,'reason':'No unique expired contract mapping from official expiry lookup'})
+                continue
+            symbol = matches[0]
+        report.setdefault('symbol_mappings', []).append({'saved_symbol':legacy_symbol,'history_symbol':symbol,'expiry':expiry,'strike':strike,'side':option_type})
         days = sorted({r['Date'] for _, r, _ in items})
         history = candles(symbol, days[0], days[-1])
         endpoint = 'history'
@@ -133,7 +157,7 @@ try:
                     break
                 current += timedelta(minutes=1)
             if complete and crossed:
-                report['stop_minutes'].append({'row': rowno, 'date': day, 'choice': row['Expiry Choice'], 'sl': row['SL %'], 'side': side, 'symbol': symbol, 'stop': threshold, 'minute': crossed.strftime('%H:%M:00'), 'candle': history[crossed][:6], 'source': endpoint, 'basis': 'SIMULATED first one-minute high crossing; complete minute coverage from entry; actual tick/fill time unknown'})
+                report['stop_minutes'].append({'row': rowno, 'date': day, 'choice': row['Expiry Choice'], 'sl': row['SL %'], 'side': side, 'symbol': legacy_symbol, 'history_symbol': symbol, 'stop': threshold, 'minute': crossed.strftime('%H:%M:00'), 'candle': history[crossed][:6], 'source': endpoint, 'basis': 'SIMULATED first one-minute high crossing; complete minute coverage from entry; actual tick/fill time unknown'})
             else:
                 report['unavailable'].append({'row': rowno, 'side': side, 'reason': 'No continuous minute path to a threshold crossing'})
     report['auth'] = 'rejected' if auth_blocked else 'verified by returned historical candles' if any(r.get('candles', 0) for r in report['requests']) else 'not verified'
