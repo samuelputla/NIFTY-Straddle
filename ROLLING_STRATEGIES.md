@@ -10,7 +10,7 @@ The twelve previous per-expiry tabs are retained as hidden migration history;
 collectors and reports use the four consolidated tabs. Summary rows are keyed by
 Date, Family and Expiry Choice; log rows retain their unique Event ID. Checkpoints
 reserve stable physical rows and retry the same cells, preserving expiry isolation.
-Startup refuses duplicate identities or unexpected schemas. Validation and comparison
+Startup refuses duplicate identities or unexpected schemas. Validation
 reports select each expiry from the consolidated data rather than the hidden history.
 
 Forward-only start: 29 October 2026. Existing Fixed Entry collectors and history are unchanged. Never place real broker orders. Every family has Current Week, Next Week and Monthly selectors. Exact contract symbols come from FYERS master and expiry metadata. Include actual expiry day; Next Week means one listed expiry after Current Week. Monthly uses actual futures expiry cross-verified in option metadata.
