@@ -29,6 +29,9 @@ class QualityTests(unittest.TestCase):
      self.assertNotIn('final_ce_time',ast.unparse(n.value));self.assertNotIn('final_pe_time',ast.unparse(n.value))
  def test_outgoing_quote_outside_atm_chain(self):
   scope={'chains':{'expiry':{'at':100,'data':{'optionsChain':[{'ltp':22900},{'symbol':'newCE','option_type':'CE','strike_price':22900,'greeks':{'delta':.5}},{'symbol':'newPE','option_type':'PE','strike_price':22900,'greeks':{'delta':-.5}}]}}},'prices':{'oldPE':(50,99),'newCE':(100,99),'newPE':(101,99)},'options':{'expiry':{(22900,'CE'):'newCE',(22900,'PE'):'newPE'}},'good':__import__('rolling_engine').good}
+  scope['now']=lambda:datetime(2026,10,29,11,20,10,tzinfo=IST)
+  scope['prices']={symbol:tick+(scope['now']().isoformat(),) for symbol,tick in scope['prices'].items()}
+  compile_function(function('rolling_collector.py','fresh_prices'),scope)
   pair,gs,qs=compile_function(function('rolling_collector.py','pair_for'),scope)('expiry',100)
   self.assertEqual(qs['oldPE'],50);self.assertEqual(pair['CE']['price'],100)
   pair,gs,qs=scope['pair_for']('expiry',111);self.assertNotIn('oldPE',qs)

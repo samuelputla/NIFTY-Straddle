@@ -29,10 +29,16 @@ def read_studies(book, tabs):
     logs = book.worksheet(LOGS).get_all_values()
     summaries = {t: select_choice(summary, c) for t, c in zip(LEGACY, CHOICES)}
     logsets = {t: select_choice(logs, c) for t, c in zip(LEGACY, CHOICES)}
+    rolling = {}
     for tab in tabs:
         if tab not in LEGACY:
-            summaries[tab] = book.worksheet(tab).get_all_values()
-            logsets[tab] = book.worksheet(tab + ' Logs').get_all_values()
+            from rolling_sheet_store import physical_title, select_study
+            physical, family, choice = physical_title(tab)
+            if physical not in rolling:
+                rolling[physical] = book.worksheet(physical).get_all_values()
+                rolling[family + ' Logs'] = book.worksheet(family + ' Logs').get_all_values()
+            summaries[tab] = select_study(rolling[physical], family, choice)
+            logsets[tab] = select_study(rolling[family + ' Logs'], family, choice)
     return summaries, logsets
 
 
