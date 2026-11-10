@@ -1,8 +1,22 @@
 name: Short Strangle Paper Research
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Collect live paper session or verify an existing session after close
+        type: choice
+        options: [collect, verify]
+        default: collect
+      session_date:
+        description: Existing session date for verification (YYYY-MM-DD), blank for today
+        type: string
+        required: false
   schedule:
     - cron: '40 3 * * 1-5'
+    - cron: '35 9 * * 1-5'
+  push:
+    branches: [main]
+    paths: ['.automation/short-strangle-close.json']
 permissions:
   contents: read
 concurrency:
@@ -10,6 +24,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   track:
+    if: ${{ (github.event_name == 'schedule' && github.event.schedule == '40 3 * * 1-5') || (github.event_name == 'workflow_dispatch' && inputs.mode != 'verify') }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -36,3 +51,27 @@ jobs:
           path: short_strangle_output/
           if-no-files-found: ignore
           retention-days: 30
+  verify:
+    if: ${{ github.event_name == 'push' || (github.event_name == 'schedule' && github.event.schedule == '35 9 * * 1-5') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'verify') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      SESSION_DATE: ${{ inputs.session_date || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-paper.txt
+      - run: python -m unittest discover -s short_strangle -p 'test_*.py'
+      - name: Verify CE and PE stop paths through 15:00 using FYERS candles
+        run: python -u -m short_strangle.close_session
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: short-strangle-candle-check-${{ github.run_id }}
+          path: short_strangle_close_output/
+          retention-days: 30
+          if-no-files-found: ignore
