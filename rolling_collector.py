@@ -8,6 +8,7 @@ from sheets_resilience import ResilientHTTPClient
 from rolling_sheet_store import ConsolidatedRollingStore
 from quote_quality import quote_prices
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
+from option_observations import Observer
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
 def fresh_prices(prices,mono,at,max_age=10):
@@ -38,6 +39,7 @@ def main():
   if result.get('s')!='ok':raise RuntimeError(f'FYERS {method} error {result.get("code")}')
   return result
  if call('get_profile',{}).get('s')!='ok':raise RuntimeError('Authentication unavailable')
+ observations=Observer(book,call,day,'rolling')
  req=urllib.request.Request('https://public.fyers.in/sym_details/NSE_FO.csv',headers={'User-Agent':'NiftyPaperResearch'})
  with urllib.request.urlopen(req,timeout=15) as response:text=response.read().decode('utf-8-sig')
  options={};monthly=set()
@@ -70,6 +72,7 @@ def main():
   if symbol and good(price) and price>0:
    with lock:
     stamp=now().isoformat();prices[symbol]=(price,time.monotonic(),stamp)
+    observations.tick(symbol,price,stamp)
     if '09:30:00'<=stamp[11:19]<'15:00:00':
      for study in studies:study.tick(symbol,price,stamp)
  def on_connect():connected.set()
@@ -97,6 +100,7 @@ def main():
    if metadata_notes:row[9]+='; '+'; '.join(metadata_notes)
   store.checkpoint(summaries,logsets)
   try:
+   observations.publish()
    evidence.save('Delta Measurements',DELTA_HEADERS,delta_evidence,update=True)
    evidence.save('Execution Measurements',EXEC_HEADERS,execution_evidence)
   except Exception as error:print('Measurement checkpoint pending:',type(error).__name__)
@@ -160,10 +164,18 @@ def main():
      final_at=now().isoformat();quotes=fresh_prices(prices,time.monotonic(),final_at)
      for study in studies:study.advance(final_at,None,quotes,{},time.monotonic())
      for study in studies:
+      for sc in study.scenarios.values():
+       for cy in sc.cycles:
+        for side,leg in cy.legs.items():
+         if leg.exit_at:observations.exited(study.family,study.choice,sc.pct,cy.number,side,leg.exit_at,leg.reason)
+     for study in studies:
       if not all(sc.done for sc in study.scenarios.values()):study.issue('INCOMPLETE final quotes')
     if save_thread:save_thread.join(timeout=180)
     if save_thread and save_thread.is_alive():raise RuntimeError('Prior checkpoint did not finish; finalization requires review')
-    persist();print('Paper session finalized; no broker orders');final=True
+    persist()
+    try:observations.finish()
+    except Exception as error:print('Optional option observations unavailable:',type(error).__name__)
+    print('Paper session finalized; no broker orders');final=True
    break
   if mono>=next_chain:
    expiry=unique[which%len(unique)];which+=1;next_chain=mono+5
@@ -218,6 +230,11 @@ def main():
        observed=chains[study.expiry]['requested']
        study.observe_delta(now().isoformat(),gs,observed)
        study.advance(now().isoformat(),pair,qs,gs,time.monotonic())
+       for sc in study.scenarios.values():
+        for cy in sc.cycles:
+         for side,leg in cy.legs.items():
+          observations.register(study.family,study.choice,study.expiry,sc.pct,cy.number,side,leg.symbol,cy.entry_at,leg.entry,leg.stop)
+          if leg.exit_at:observations.exited(study.family,study.choice,sc.pct,cy.number,side,leg.exit_at,leg.reason)
        study.observe_delta(now().isoformat(),gs,observed)
        for row in delta_rows([study]):
         key=(row[0],row[9])

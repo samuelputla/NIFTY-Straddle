@@ -13,6 +13,7 @@ import time as time_module
 
 from pathlib import Path
 from measurement_log import EvidenceWriter,EXEC_HEADERS,execution_row
+from option_observations import Observer
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -619,6 +620,7 @@ def on_message(message):
         ltp = float(raw_ltp)
     except (TypeError, ValueError):
         return
+    observations.tick(symbol, ltp, now_ist().isoformat())
     if symbol == ce_symbol:
         handle_sl("CE", ltp)
     elif symbol == pe_symbol:
@@ -939,6 +941,15 @@ pending_scenario_updates = set()
 execution_measurements = []
 execution_writer = EvidenceWriter(spreadsheet)
 last_measurement_save = 0
+observations = Observer(spreadsheet, call_fyers, capture_time.date().isoformat(), 'fixed_'+EXPIRY_CHOICE.replace(' ','_'), enabled=not TEST_MODE)
+observation_expiry = expiry['date']
+try:
+    observation_expiry = datetime.strptime(observation_expiry, '%d-%m-%Y').date().isoformat()
+except ValueError:
+    observation_expiry = datetime.fromisoformat(observation_expiry).date().isoformat()
+for pct in SL_PERCENTAGES:
+    for side, symbol, premium in [('CE',ce_symbol,ce_entry),('PE',pe_symbol,pe_entry)]:
+        observations.register('Fixed Entry',EXPIRY_CHOICE,observation_expiry,pct,1,side,symbol,capture_time.isoformat(),premium,round(premium*(1+pct/100),2))
 stop_event = threading.Event()
 ws_holder = {"socket": None}
 if not TEST_MODE:
@@ -1118,6 +1129,7 @@ def save_execution_evidence():
 while not stop_event.wait(timeout=0.5):
     if time_module.monotonic() - last_measurement_save >= 30:
         save_execution_evidence()
+        observations.checkpoint()
     changed_opening = poll_day_open()
     changed_metadata = poll_entry_metadata() or changed_opening
     with state_lock:
@@ -1188,6 +1200,14 @@ if daily_row_number is not None:
 
 print("\n=================================================")
 save_execution_evidence()
+try:
+    for pct, scenario in state['scenarios'].items():
+        for side in ('CE','PE'):
+            at=scenario[side.lower()+'_exit_time']
+            observations.exited('Fixed Entry',EXPIRY_CHOICE,pct,1,side,at.isoformat() if at else '',scenario[side.lower()+'_exit_reason'])
+    observations.finish()
+except Exception as error:
+    print('Optional option observations unavailable:',type(error).__name__)
 print("FINAL PAPER RESULTS BY STOP-LOSS SCENARIO")
 print("=================================================")
 for percent in SL_PERCENTAGES:
