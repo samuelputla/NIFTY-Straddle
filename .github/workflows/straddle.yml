@@ -103,6 +103,9 @@ jobs:
       - name: Record collector readiness
         run: python session_timing.py collector-ready
 
+      - name: Verify additive option observations
+        run: python -m unittest test_option_observations
+
       - name: Run selected fixed-entry straddle
         run: python -u ${{ matrix.script }}
 
@@ -112,5 +115,14 @@ jobs:
         with:
           name: fixed-execution-${{ matrix.script }}-${{ github.run_id }}
           path: fixed_execution_measurements.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Preserve option entry snapshots and premium-high evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: option-observations-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_id }}
+          path: option_observations/
           if-no-files-found: ignore
           retention-days: 30

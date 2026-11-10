@@ -12,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from market_calendar import session_allowed
+from option_observations import Observer
 from quote_quality import quote_prices
 from request_timing import run_with_timeout
 from short_strangle.engine import make_scenarios, positive, select_expiries
@@ -48,11 +49,12 @@ def main():
     token = os.environ['FYERS_ACCESS_TOKEN'].strip()
     def call(method, payload):
         # Method names below are exclusively data methods; no order client is exposed.
-        if method not in ('optionchain', 'quotes'): raise ValueError('Read-only methods only')
+        if method not in ('optionchain', 'quotes', 'depth', 'history'): raise ValueError('Read-only methods only')
         model = fyersModel.FyersModel(client_id='M2DACFCYUO-100', token=token, log_path='')
         response = run_with_timeout(lambda: getattr(model, method)(payload), 6)
         if response.get('s') != 'ok': raise RuntimeError('Market data unavailable')
         return response
+    observations=Observer(store.book,call,day,'strangle')
     req = urllib.request.Request('https://public.fyers.in/sym_details/NSE_FO.csv', headers={'User-Agent':'NiftyPaperResearch'})
     with urllib.request.urlopen(req, timeout=15) as response:
         text = response.read().decode('utf-8-sig')
@@ -78,6 +80,7 @@ def main():
         with lock:
             at = now().isoformat()
             prices[symbol] = (price, time.monotonic())
+            observations.tick(symbol,price,at)
             if not journal.closed:
                 journal.write(json.dumps({'at':at, 'symbol':symbol, 'price':price}) + '\n')
             for scenario in scenarios: scenario.tick(symbol, price, at)
@@ -97,7 +100,9 @@ def main():
     pending = None
     errors = []
     def persist(snapshot):
-        try: store.save(snapshot)
+        try:
+            store.save(snapshot)
+            observations.publish()
         except Exception as error: errors.append(type(error).__name__)
     def snapshot():
         import copy
@@ -114,6 +119,10 @@ def main():
                 fresh = {s:p for s,(p,t) in prices.items() if 0 <= mono-t <= 10}
                 for scenario in scenarios:
                     scenario.enter(fresh, at)
+                    for side,premium in scenario.entries.items():
+                        observations.register('Short Strangle',scenario.choice+' '+str(scenario.distance)+'%',scenario.expiry,scenario.pct,1,side,scenario.symbols[side],scenario.entry_at,premium,round(premium*(1+scenario.pct/100),2))
+                    for side,exit_value in scenario.exits.items():
+                        observations.exited('Short Strangle',scenario.choice+' '+str(scenario.distance)+'%',scenario.pct,1,side,exit_value[1],exit_value[2])
                     # Evaluate the capture snapshot too; a first leg may move while waiting for its pair.
                     for symbol, price in fresh.items(): scenario.tick(symbol, price, at)
                     if scenario.entries and mono-last_loop > 10: scenario.issue('Collector gap >10 seconds')
@@ -146,6 +155,12 @@ def main():
         if pending: pending.join(timeout=180)
         if pending and pending.is_alive(): raise RuntimeError('Sheet writer still busy; final state saved for recovery')
         store.save(saved)
+        try:
+            for scenario in scenarios:
+                for side,value in scenario.exits.items():
+                    observations.exited('Short Strangle',scenario.choice+' '+str(scenario.distance)+'%',scenario.pct,1,side,value[1],value[2])
+            observations.finish()
+        except Exception as error:print('Optional option observations unavailable:',type(error).__name__)
         print('Paper session saved: 81 scenarios; no broker orders')
     finally:
         snapshot()
