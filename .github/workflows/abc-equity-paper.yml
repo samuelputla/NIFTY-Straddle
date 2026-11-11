@@ -1,4 +1,5 @@
 name: ABC Equity Paper Trading
+run-name: ${{ (github.event_name == 'schedule' || inputs.collect) && 'ABC live paper collection' || 'ABC shared Sheet check' }}
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +9,12 @@ on:
         default: false
   schedule:
     - cron: '25 3 * * 1-5'
+  push:
+    branches: [main]
+    paths:
+      - abc_paper.py
+      - test_abc_paper.py
+      - .github/workflows/abc-equity-paper.yml
 permissions:
   contents: read
 concurrency:
@@ -18,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
       FYERS_CLIENT_ID: ${{ vars.FYERS_CLIENT_ID }}
       ABC_SYMBOLS: ${{ vars.ABC_SYMBOLS || 'RELIANCE,HDFCBANK,ICICIBANK,INFY,TCS,SBIN,AXISBANK,LT' }}
@@ -28,10 +36,12 @@ jobs:
           python-version: '3.11'
       - run: python -m unittest -v test_abc_paper
       - name: Install paper trading dependencies
-        if: github.event_name == 'schedule' || inputs.collect
         run: python -m pip install -r requirements-paper.txt
+      - name: Check the shared Sheet connection
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.collect)
+        run: python -c 'from abc_paper import open_trade_sheet; open_trade_sheet()'
       - name: Collect and simulate ABC paper trades
-        if: github.event_name == 'schedule' || inputs.collect
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect)
         run: python -u abc_paper.py
       - uses: actions/upload-artifact@v4
         if: always()
