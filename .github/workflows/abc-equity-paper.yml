@@ -21,7 +21,26 @@ concurrency:
   group: abc-equity-paper
   cancel-in-progress: false
 jobs:
+  wait-for-open:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wait until 09:08 IST for collection
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect)
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, time
+          from time import sleep
+          from zoneinfo import ZoneInfo
+
+          ist = ZoneInfo("Asia/Kolkata")
+          now = datetime.now(ist)
+          target = datetime.combine(now.date(), time(9, 8), ist)
+          if now < target:
+              sleep((target - now).total_seconds())
+          PY
   paper:
+    needs: wait-for-open
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
