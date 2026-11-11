@@ -9,6 +9,7 @@ from rolling_sheet_store import ConsolidatedRollingStore
 from quote_quality import quote_prices
 from measurement_log import EvidenceWriter,DELTA_HEADERS,EXEC_HEADERS,delta_rows,execution_rows
 from option_observations import Observer
+from session_vix import SOURCE as VIX_HISTORY_SOURCE, minute_open
 IST=ZoneInfo('Asia/Kolkata');BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI';INDEX='NSE:NIFTY50-INDEX'
 def now():return datetime.now(IST)
 def fresh_prices(prices,mono,at,max_age=10):
@@ -65,7 +66,14 @@ def main():
    value=quote_prices(response,['NSE:INDIAVIX-INDEX'])['NSE:INDIAVIX-INDEX']
    with lock:vix_result.update(value=value,at=now().isoformat())
   except Exception as error:
-   with lock:vix_result.update(error=type(error).__name__,at=now().isoformat())
+   # Wait for the minute bar to close outside the collector's trading loop.
+   wait = (datetime.fromisoformat(day+'T09:31:05+05:30')-now()).total_seconds()
+   if wait > 0:time.sleep(wait)
+   try:
+    value=minute_open(call,day)
+    with lock:vix_result.update(value=value,at=now().isoformat(),source=VIX_HISTORY_SOURCE)
+   except Exception as history_error:
+    with lock:vix_result.update(error=type(history_error).__name__,at=now().isoformat())
  def on_message(message):
   if not isinstance(message,dict):return
   symbol=message.get('symbol');price=message.get('ltp')
@@ -134,7 +142,7 @@ def main():
    with lock:
     if 'value' in vix_result:
      for study in studies:study.vix=vix_result['value']
-     metadata_notes.append('VIX retrieved '+vix_result['at']+'; response-time snapshot, not guaranteed exact entry')
+     metadata_notes.append('VIX retrieved '+vix_result['at']+'; '+vix_result.get('source','response-time quote snapshot'))
     else:metadata_notes.append('VIX unavailable at '+vix_result['at']+'; '+vix_result['error'])
   if mono-last_monotonic>15 and clock>=dt_time(9,30):
    for study in studies:study.issue('Collector processing gap >15 seconds')

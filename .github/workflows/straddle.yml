@@ -114,7 +114,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fixed-execution-${{ matrix.script }}-${{ github.run_id }}
-          path: fixed_execution_measurements.json
+          path: |
+            fixed_execution_measurements.json
+            fixed_final_rows.json
           if-no-files-found: ignore
           retention-days: 30
 
