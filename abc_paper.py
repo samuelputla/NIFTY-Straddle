@@ -4,6 +4,7 @@ import math
 import os
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from decimal import Decimal
@@ -17,6 +18,44 @@ OPEN = time(9, 15)
 EXIT = time(15)
 WATCHLIST = "RELIANCE,HDFCBANK,ICICIBANK,INFY,TCS,SBIN,AXISBANK,LT"
 OUTPUT = Path("abc-paper.jsonl")
+BOOK = "1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI"
+TAB = "ABC Paper Trades"
+HEADERS = [
+    "Date", "Trade ID", "Symbol", "Status", "Entry Time IST", "A",
+    "B / Planned Entry", "Observed Entry", "Stop", "Target", "Exit Time IST",
+    "Exit Price", "Exit Reason", "Observed P&L / Share",
+    "Planned P&L / Share", "Exit Quote Time IST",
+]
+
+
+def trade_row(row):
+    entered = row["entry_at"]
+    closed = row["event"] == "exit"
+    return [
+        entered[:10], f'{row["symbol"]}|{entered}', row["symbol"],
+        "CLOSED" if closed else "OPEN", entered, float(row["a"]),
+        float(row["planned_entry"]), float(row["entry"]), float(row["stop"]),
+        float(row["target"]), row["at"] if closed else "",
+        float(row["price"]) if closed else "", row.get("reason", ""),
+        float(row["pnl_per_share"]) if closed else "",
+        float(row["planned_pnl_per_share"]) if closed else "",
+        row.get("quote_at", ""),
+    ]
+
+
+def open_trade_sheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from sheets_resilience import ResilientHTTPClient, RollingSheetStore
+
+    credentials = Credentials.from_service_account_info(
+        json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    client = gspread.authorize(credentials, http_client=ResilientHTTPClient)
+    client.set_timeout((3, 8))
+    book = client.open_by_key(BOOK)
+    return RollingSheetStore(book, {TAB: HEADERS}, row_key=lambda _tab, row: row[1])
 
 
 @dataclass
@@ -104,7 +143,7 @@ class Strategy:
                 self.used.add((self.a, self.b))
                 self.trade = dict(a=self.a, b=self.b, stop=stop,
                                   target=self.b + 2 * (self.b - stop),
-                                  planned_entry=self.b, entry=price)
+                                  planned_entry=self.b, entry=price, entry_at=at.isoformat())
                 self.emit("entry", at, **self.trade)
                 if price >= self.trade["target"]:
                     self.exit(at, "target")
@@ -143,6 +182,11 @@ def run():
     if not symbols:
         raise RuntimeError("ABC_SYMBOLS is empty")
 
+    sheet = open_trade_sheet()
+    sheet.check_day(day.isoformat())
+    if now().time() >= OPEN:
+        raise RuntimeError("ABC setup did not finish before 09:15 IST")
+
     events = queue.Queue()
     def on_message(message):
         if not isinstance(message, dict):
@@ -163,11 +207,16 @@ def run():
         write_to_file=False, reconnect=False, on_connect=on_connect,
         on_close=on_failure, on_error=on_failure, on_message=on_message,
     )
-    with OUTPUT.open("w", encoding="utf-8", buffering=1) as journal:
+    # Sheets writes run in order on one worker, while price processing continues.
+    pending = []
+    with (OUTPUT.open("w", encoding="utf-8", buffering=1) as journal,
+          ThreadPoolExecutor(max_workers=1) as writer):
         def logger(symbol):
             def emit(event, at, **fields):
                 row = dict(symbol=symbol, event=event, at=at.isoformat(), **fields)
                 journal.write(json.dumps(row, default=str) + "\n")
+                if event in {"entry", "exit"}:
+                    pending.append(writer.submit(sheet.checkpoint, [(TAB, trade_row(row))], []))
             return emit
 
         strategies = {symbol: Strategy(logger(symbol)) for symbol in symbols}
@@ -192,6 +241,8 @@ def run():
                 strategies[symbol].tick(at, price)
         for strategy in strategies.values():
             strategy.exit(end, "session_last_observed_price")
+        for write in pending:
+            write.result()
         logger("SESSION")("complete", end, symbols=symbols)
 
 
