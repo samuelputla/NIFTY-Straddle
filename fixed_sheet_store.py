@@ -57,14 +57,44 @@ class ScopedWorksheet:
             for r in values[1:]]
 
     def append_rows(self, rows, **kwargs):
-        if any(len(r) != len(self.headers) for r in rows):
-            raise ValueError('Row width differs from schema')
-        result = self.sheet.append_rows([r + [self.choice] for r in rows],
-            value_input_option='RAW', insert_data_option='INSERT_ROWS',
-            table_range='A1')
-        first = appended_row(result)
+        if not rows or any(len(r) != len(self.headers) for r in rows):
+            raise ValueError('Invalid append rows for worksheet schema')
+        values = [[value if value is not None else '' for value in row] + [self.choice]
+                  for row in rows]
+
+        def cell(value):
+            if isinstance(value, bool):
+                return {'userEnteredValue': {'boolValue': value}}
+            if isinstance(value, (int, float)):
+                return {'userEnteredValue': {'numberValue': value}}
+            return {'userEnteredValue': {'stringValue': str(value)}}
+
+        # Append after the sheet's last populated row without inserting at a
+        # table-relative location. Other collectors must never shift these rows.
+        self.sheet.spreadsheet.batch_update({'requests': [{'appendCells': {
+            'sheetId': self.sheet.id,
+            'rows': [{'values': [cell(value) for value in row]} for row in values],
+            'fields': 'userEnteredValue',
+        }}]})
+        actual = self.sheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
+        width = len(self.headers) + 1
+        key_columns = [self.headers.index(name)
+                       for name in ('Date', 'Entry Time', 'SL %', 'Run Type')
+                       if name in self.headers] + [width - 1]
+        keys = [tuple(row[j] for j in key_columns) for row in values]
+        actual_keys = [tuple(row[j] for j in key_columns) if len(row) >= width else None
+                       for row in actual]
+        matches = [i + 1 for i, key in enumerate(actual_keys)
+                   if key == keys[0] and actual_keys[i:i + len(keys)] == keys]
+        if len(matches) != 1:
+            raise RuntimeError('Could not uniquely locate appended rows; refusing to update')
+        first = matches[0]
         self.owned.update(range(first, first + len(rows)))
-        return result
+        last_col = ''
+        while width:
+            width, remainder = divmod(width - 1, 26)
+            last_col = chr(65 + remainder) + last_col
+        return {'updates': {'updatedRange': f"'{self.sheet.title}'!A{first}:{last_col}{first + len(rows) - 1}"}}
 
     def append_row(self, row, **kwargs):
         return self.append_rows([row])
