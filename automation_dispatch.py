@@ -8,9 +8,11 @@ import re
 from market_calendar import session_allowed
 IST=ZoneInfo('Asia/Kolkata');REPO='samuelputla/NIFTY-Straddle'
 BOOK='1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
+ABC_WORKFLOW='abc-equity-paper.yml'
 WORKFLOWS={
  'straddle.yml':({'test_mode':'false','setup_only':'false'},['Straddle Fixed Summary']),
- 'rolling-straddles.yml':({'setup_only':'false'},['Time Based Summary','Delta Based Summary'])}
+ 'rolling-straddles.yml':({'setup_only':'false'},['Time Based Summary','Delta Based Summary']),
+ ABC_WORKFLOW:({'collect':'true'},['ABC Paper Trades'])}
 ACTIVE={'queued','in_progress','waiting','requested','pending'}
 class GitHub:
  def __init__(self,token,base='https://api.github.com'):
@@ -35,7 +37,10 @@ def blocker(runs,day):
  if today:return 'Existing current-day run; failed/partial runs require review, not an automatic rerun',today
  return '',[]
 def safe_dispatch(api,workflow,inputs,day,has_entry,now_fn=lambda:datetime.now(IST),kind='start'):
+ deadline=dt_time(9,15) if workflow==ABC_WORKFLOW else dt_time(9,25)
  def relevant(runs):
+  if workflow==ABC_WORKFLOW:
+   return [r for r in runs if r.get('event')=='schedule' or r.get('display_title')=='ABC live paper collection']
   if kind!='audit':return runs
   # An explicitly dated past-session verification is not today's scheduled audit.
   def keep(r):
@@ -44,7 +49,7 @@ def safe_dispatch(api,workflow,inputs,day,has_entry,now_fn=lambda:datetime.now(I
   return [r for r in runs if keep(r)]
  clock=now_fn()
  if clock.date().isoformat()!=day:return {'workflow':workflow,'status':'SKIPPED','reason':'Date changed'}
- if kind=='start' and not dt_time(8,45)<=clock.time()<dt_time(9,25):return {'workflow':workflow,'status':'SKIPPED','reason':'Outside 08:45–09:25 IST start window; never dispatch late positions'}
+ if kind=='start' and not dt_time(8,45)<=clock.time()<deadline:return {'workflow':workflow,'status':'SKIPPED','reason':f'Outside 08:45–{deadline:%H:%M} IST start window'}
  if kind=='audit' and clock.time()<dt_time(16,7):return {'workflow':workflow,'status':'SKIPPED','reason':'Audit is not due yet'}
  reason,runs=blocker(relevant(api.runs(workflow)),day)
  if reason:return {'workflow':workflow,'status':'SKIPPED','reason':reason,'runs':[r['html_url'] for r in runs]}
@@ -54,7 +59,7 @@ def safe_dispatch(api,workflow,inputs,day,has_entry,now_fn=lambda:datetime.now(I
  reason,runs=blocker(relevant(api.runs(workflow)),day)
  if reason:return {'workflow':workflow,'status':'SKIPPED','reason':reason,'runs':[r['html_url'] for r in runs]}
  clock=now_fn()
- if kind=='start' and clock.time()>=dt_time(9,25):return {'workflow':workflow,'status':'SKIPPED','reason':'Start window ended during checks'}
+ if kind=='start' and clock.time()>=deadline:return {'workflow':workflow,'status':'SKIPPED','reason':'Start window ended during checks'}
  api.dispatch(workflow,inputs)
  for attempt in range(6):
   runs=[r for r in relevant(api.runs(workflow)) if current_day(r,day)]
