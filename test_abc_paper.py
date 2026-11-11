@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime
 from decimal import Decimal as D
 
-from abc_paper import Candle, IST, Strategy
+from abc_paper import Candle, IST, Strategy, trade_row
 
 
 class PatternTest(unittest.TestCase):
@@ -38,6 +38,19 @@ class PatternTest(unittest.TestCase):
         self.strategy.tick(self.at, D("104.79"))
         self.strategy.tick(self.at, D("111"))
         self.assertIsNone(self.strategy.trade)
+
+    def test_sheet_entry_and_exit_share_a_trade_id(self):
+        self.close(105, 109, 106)
+        self.strategy.tick(self.at, D("110.50"))
+        self.strategy.tick(self.at, D("121"))
+        entry, exit = self.events[-2:]
+        rows = [trade_row(dict(fields, event=event, at=self.at.isoformat(),
+                               symbol="NSE:SBIN-EQ"))
+                for event, fields in (entry, exit)]
+        self.assertEqual(rows[0][1], rows[1][1])
+        self.assertEqual([row[3] for row in rows], ["OPEN", "CLOSED"])
+        self.assertEqual(rows[1][6:10], [110, 110.5, 104.8, 120.4])
+        self.assertEqual(rows[1][11:15], [121, "target", 10.5, 11])
 
     def test_session_exit(self):
         self.close(105, 109, 106)
