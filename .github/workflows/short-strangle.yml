@@ -13,7 +13,6 @@ on:
         required: false
   schedule:
     - cron: '40 3 * * 1-5'
-    - cron: '35 9 * * 1-5'
   push:
     branches: [main]
     paths: ['.automation/short-strangle-close.json']
@@ -42,6 +41,11 @@ jobs:
           python -m unittest test_option_observations
       - name: Collect paper scenarios
         run: python -u -m short_strangle.collector
+      - name: Reconcile stop crossings after collection
+        if: ${{ success() && hashFiles('short_strangle_output/state.json') != '' }}
+        run: |
+          sleep 65
+          python -m short_strangle.close_session
       - name: Audit saved paper configuration and accounting
         if: ${{ always() && hashFiles('short_strangle_output/state.json') != '' }}
         run: python -m short_strangle.report
@@ -50,11 +54,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: short-strangle-${{ github.run_id }}
-          path: short_strangle_output/
+          path: |
+            short_strangle_output/
+            short_strangle_close_output/
+            option_observations/
           if-no-files-found: ignore
           retention-days: 30
   verify:
-    if: ${{ github.event_name == 'push' || (github.event_name == 'schedule' && github.event.schedule == '35 9 * * 1-5') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'verify') }}
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'verify') }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:

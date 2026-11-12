@@ -115,7 +115,12 @@ def main():
         try:
             payload = {'symbol':symbol,'resolution':'1','date_format':'1',
                        'range_from':day,'range_to':day,'cont_flag':'0'}
-            response = run_with_timeout(lambda: api.history(payload), 15)
+            saved = Path('option_observations/strangle') / ('history-' + symbol.replace(':','_') + '.json')
+            response = json.loads(saved.read_text(encoding='utf-8')) if saved.is_file() else {}
+            if candle_mark(response, day) is None:
+                refreshed = run_with_timeout(lambda: api.history(payload), 15)
+                if refreshed.get('s') == 'ok' or response.get('s') != 'ok':
+                    response = refreshed
             mark = candle_mark(response, day)
             evidence[symbol] = {'response':response,'recovery_mark':mark}
             responses[symbol] = response
