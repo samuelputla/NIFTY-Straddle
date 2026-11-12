@@ -1,5 +1,5 @@
 name: ABC Equity Paper Trading
-run-name: ${{ (github.event_name == 'schedule' || inputs.collect) && 'ABC live paper collection' || 'ABC shared Sheet check' }}
+run-name: ${{ (github.event_name == 'schedule' || inputs.collect || github.event.head_commit.message == 'Start ABC paper session') && 'ABC live paper collection' || 'ABC shared Sheet check' }}
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +12,7 @@ on:
   push:
     branches: [main]
     paths:
+      - .automation/abc-session.json
       - abc_paper.py
       - test_abc_paper.py
       - .github/workflows/abc-equity-paper.yml
@@ -25,16 +26,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push' && github.event.head_commit.message == 'Start ABC paper session'
       - name: Wait until 09:08 IST for collection
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect) || (github.event_name == 'push' && github.event.head_commit.message == 'Start ABC paper session')
         run: |
           python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
           from datetime import datetime, time
           from time import sleep
           from zoneinfo import ZoneInfo
 
           ist = ZoneInfo("Asia/Kolkata")
           now = datetime.now(ist)
+          if os.environ["GITHUB_EVENT_NAME"] == "push":
+              request = json.loads(Path(".automation/abc-session.json").read_text())
+              issued = datetime.fromisoformat(request["issued_at"])
+              if issued.tzinfo is None or request["date"] != now.date().isoformat():
+                  raise SystemExit("ABC request does not match today's IST session")
+              if not 0 <= (now - issued).total_seconds() <= 30 * 60:
+                  raise SystemExit("ABC request is stale or future-dated")
+          if now.time() >= time(9, 15):
+              raise SystemExit("Missed 09:15 IST startup cutoff")
           target = datetime.combine(now.date(), time(9, 8), ist)
           if now < target:
               sleep((target - now).total_seconds())
@@ -57,10 +72,10 @@ jobs:
       - name: Install paper trading dependencies
         run: python -m pip install -r requirements-paper.txt
       - name: Check the shared Sheet connection
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.collect)
+        if: (github.event_name == 'push' && github.event.head_commit.message != 'Start ABC paper session') || (github.event_name == 'workflow_dispatch' && !inputs.collect)
         run: python -c 'from abc_paper import open_trade_sheet; open_trade_sheet()'
       - name: Collect and simulate ABC paper trades
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect)
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.collect) || (github.event_name == 'push' && github.event.head_commit.message == 'Start ABC paper session')
         run: python -u abc_paper.py
       - uses: actions/upload-artifact@v4
         if: always()
