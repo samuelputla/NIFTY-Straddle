@@ -8,6 +8,8 @@ LEVELS = tuple(range(10, 51, 5))
 CHOICES = ('Current Week', 'Next Week', 'Monthly')
 QTY = 65
 COST = 150
+QUOTE_GAP = 'Open-contract quote gap >10 seconds; stop path incomplete'
+HIGH_RECONCILED = 'Stop outcomes reconciled from recorded session highs'
 
 def select_expiries(contracts, monthly, listed):
     available = sorted(set(contracts) & set(listed))
@@ -92,6 +94,39 @@ class Scenario:
                     self.exits[side] = (quotes[sym], at, '15:00 EXIT observed paper mark')
                 else:
                     self.issue('Missing final quote; unresolved position')
+
+    def reconcile_session_highs(self, highs):
+        """Apply the session-high paper rule using matching observation rows."""
+        changed = False
+        resolved = set()
+        for side, entry in self.entries.items():
+            evidence = highs.get(side)
+            if not evidence:
+                continue
+            stop = round(entry * (1 + self.pct / 100), 2)
+            if (evidence[8] != self.symbols[side] or evidence[9] != self.entry_at
+                    or evidence[10] != stop or evidence[28] != entry):
+                continue
+            high = evidence[24]
+            hit = positive(high) and high >= stop
+            prior = self.exits.get(side)
+            prior_stop = prior and prior[2].startswith('SL ')
+            if hit and not prior_stop:
+                at = evidence[26] or (evidence[16] if evidence[15] == high else evidence[20])
+                if not at or not self.entry_at <= at < evidence[14]:
+                    at = evidence[14]
+                self.exits[side] = (stop, at, 'SL recorded session-high threshold paper fill; evidence timestamp')
+                changed = True
+            complete = (positive(high) and evidence[23] == 'COMPLETE MINUTE BARS'
+                        and evidence[21] == evidence[22] == 330)
+            if hit or prior_stop or complete:
+                resolved.add(side)
+        if resolved == {'CE', 'PE'} and (QUOTE_GAP in self.notes or changed):
+            if QUOTE_GAP in self.notes:
+                self.notes.remove(QUOTE_GAP)
+            self.issue(HIGH_RECONCILED + ' (premium >= SL)')
+            changed = True
+        return changed
 
     @property
     def status(self):
