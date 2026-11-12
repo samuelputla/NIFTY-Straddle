@@ -15,7 +15,7 @@ from market_calendar import session_allowed
 from option_observations import Observer
 from quote_quality import quote_prices
 from request_timing import run_with_timeout
-from short_strangle.engine import make_scenarios, positive, select_expiries
+from short_strangle.engine import QUOTE_GAP, make_scenarios, positive, select_expiries
 
 BOOK = '1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 INDEX = 'NSE:NIFTY50-INDEX'
@@ -127,7 +127,7 @@ def main():
                     for symbol, price in fresh.items(): scenario.tick(symbol, price, at)
                     if scenario.entries and mono-last_loop > 10: scenario.issue('Collector gap >10 seconds')
                     if scenario.entries and any(sym not in fresh for side,sym in scenario.symbols.items() if side not in scenario.exits):
-                        scenario.issue('Open-contract quote gap >10 seconds; stop path incomplete')
+                        scenario.issue(QUOTE_GAP)
                 if not connected.is_set():
                     if disconnected is None: disconnected = mono
                     if mono-disconnected > 10:
@@ -161,6 +161,18 @@ def main():
                     observations.exited('Short Strangle',scenario.choice+' '+str(scenario.distance)+'%',scenario.pct,1,side,value[1],value[2])
             observations.finish()
         except Exception as error:print('Optional option observations unavailable:',type(error).__name__)
+        _, high_rows = observations.rows()
+        highs_by_scenario = {}
+        for row in high_rows:
+            if row[2] == 'Short Strangle' and row[1] == day:
+                highs_by_scenario.setdefault((row[3], row[5]), {})[row[7]] = row
+        changed = False
+        for scenario in scenarios:
+            choice = f'{scenario.choice} {scenario.distance}%'
+            if scenario.reconcile_session_highs(highs_by_scenario.get((choice, scenario.pct), {})):
+                changed = True
+        if changed:
+            store.save(snapshot())
         print('Paper session saved: 81 scenarios; no broker orders')
     finally:
         snapshot()

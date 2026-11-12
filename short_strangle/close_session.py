@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from short_strangle.engine import HEADERS, SUMMARY_HEADERS, LEVELS, DISTANCES, CHOICES
+from short_strangle.engine import HIGH_RECONCILED, HEADERS, SUMMARY_HEADERS, LEVELS, DISTANCES, CHOICES
 from request_timing import run_with_timeout
 from short_strangle.candle_check import apply_check
 
@@ -126,7 +126,10 @@ def main():
     (OUT/'fyers_1500_reference.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
     repaired, checks = [], {}
     for i,r in targets:
-        checked, details = apply_check(r,responses,day)
+        if len(r) > 26 and HIGH_RECONCILED in str(r[26]):
+            checked, details = r, {'source': 'recorded session highs'}
+        else:
+            checked, details = apply_check(r,responses,day)
         repaired.append((i,reconcile(checked,marks,day)))
         checks[r[0]] = details
     (OUT/'candle_checks.json').write_text(json.dumps(checks,indent=2),encoding='utf-8')
