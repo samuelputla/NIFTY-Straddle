@@ -1,6 +1,8 @@
 import copy
+import json
+from unittest.mock import patch
 import unittest
-from fixed_sheet_store import ScopedWorksheet, appended_row, reserve_daily, select_choice
+from fixed_sheet_store import CHOICES, LOGS, SUMMARY, ScopedWorksheet, allocate_session_rows, appended_row, reserve_daily, select_choice
 
 class FakeSpreadsheet:
     def __init__(self, sheet):
@@ -68,6 +70,37 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(row, 3)
         self.a.update('A3:B3', [['2026-11-10', 'UPDATED']])
         self.assertEqual(self.raw.rows[1][-1], 'Next Week')
+
+    def test_session_allocator_assigns_disjoint_ranges(self):
+        from unittest.mock import Mock
+        book = Mock()
+        summary = Mock(row_count=100)
+        logs = Mock(row_count=100)
+        summary.get_all_values.return_value = [['Date', 'Expiry Choice']]
+        logs.get_all_values.return_value = [['Date', 'Expiry Choice']]
+        book.worksheet.side_effect = {SUMMARY: summary, LOGS: logs}.__getitem__
+        allocation = allocate_session_rows(book, '2026-11-12')
+        self.assertEqual([allocation[LOGS][c] for c in CHOICES], [[2, 9], [11, 9], [20, 9]])
+        self.assertEqual([allocation[SUMMARY][c] for c in CHOICES], [[2, 1], [3, 1], [4, 1]])
+
+    def test_reserved_writer_uses_exact_range_and_rejects_existing_data(self):
+        from unittest.mock import Mock
+        sheet = Mock(title=LOGS)
+        sheet.get.return_value = []
+        mapping = {LOGS: {'Next Week': [11, 2]}}
+        with patch.dict('os.environ', FIXED_ROW_ALLOCATIONS=json.dumps(mapping)):
+            writer = ScopedWorksheet(sheet, ['Date', 'SL %'], 'Next Week')
+            result = writer.append_rows([['2026-11-12', 10], ['2026-11-12', 15]])
+            self.assertEqual(appended_row(result), 11)
+            sheet.update.assert_called_once_with(
+                range_name='A11:C12',
+                values=[['2026-11-12', 10, 'Next Week'], ['2026-11-12', 15, 'Next Week']],
+                value_input_option='RAW',
+            )
+            occupied = ScopedWorksheet(sheet, ['Date', 'SL %'], 'Next Week')
+            sheet.get.return_value = [['2026-11-12']]
+            with self.assertRaisesRegex(RuntimeError, 'already contain data'):
+                occupied.append_rows([['2026-11-12', 10], ['2026-11-12', 15]])
 
     def test_unknown_append_outcome_fails_closed(self):
         with self.assertRaises(RuntimeError):
