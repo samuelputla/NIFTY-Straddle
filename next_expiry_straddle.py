@@ -1086,15 +1086,14 @@ opening_finished = False
 # The socket now processes ticks while metadata and Sheets work continues.
 with state_lock:
     scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
-scenario_first_row = append_scenario_rows(scenario_rows)
-scenario_row_numbers = {
-    percent: scenario_first_row + index
-    for index, percent in enumerate(SL_PERCENTAGES)
-}
-print(
-    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
-    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
-)
+scenario_row_numbers = {}
+try:
+    scenario_first_row = append_scenario_rows(scenario_rows)
+    scenario_row_numbers.update(zip(
+        SL_PERCENTAGES, range(scenario_first_row, scenario_first_row + len(SL_PERCENTAGES))))
+except Exception as exc:
+    print(f"Initial scenario write failed; collection continues: {exc}", flush=True)
+
 
 
 def poll_entry_metadata():
@@ -1198,9 +1197,13 @@ def poll_day_open():
 
 poll_day_open()
 poll_entry_metadata()
-update_scenario_rows(SL_PERCENTAGES)
-if daily_row_number is not None:
-    write_daily_row("RUNNING")
+try:
+    if scenario_row_numbers:
+        update_scenario_rows(SL_PERCENTAGES)
+    if daily_row_number is not None:
+        write_daily_row("RUNNING")
+except Exception as exc:
+    print(f"Initial Sheet update failed; collection continues: {exc}", flush=True)
 
 def save_execution_evidence():
     global last_measurement_save
@@ -1239,6 +1242,8 @@ while not stop_event.wait(timeout=0.5):
         pending_scenario_updates.clear()
     if changed_metadata:
         changes.update(SL_PERCENTAGES)
+    if not scenario_row_numbers:
+        continue  # Recover row ownership with the complete results at close.
     if changes and time_module.monotonic() < next_sheet_write:
         with state_lock:
             pending_scenario_updates.update(changes)
@@ -1306,6 +1311,11 @@ Path("fixed_final_rows.json").write_text(json.dumps({
 }), encoding="utf-8")
 for attempt in range(4):
     try:
+        if not scenario_row_numbers:
+            with state_lock:
+                final_rows = [make_scenario_row(p) for p in SL_PERCENTAGES]
+            scenario_row_numbers.update(zip(
+                SL_PERCENTAGES, scenario_sheet.recover_log_rows(final_rows)))
         update_scenario_rows(SL_PERCENTAGES)
         if daily_row_number is not None:
             write_daily_row("COMPLETED")
@@ -1346,8 +1356,3 @@ for percent in SL_PERCENTAGES:
     )
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
-
-
-
-
-

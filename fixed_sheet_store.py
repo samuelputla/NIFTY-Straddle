@@ -24,6 +24,11 @@ def appended_row(response):
     return int(match.group(1))
 
 
+def range_from_append(response, count):
+    first = appended_row(response)
+    return range(first, first + count)
+
+
 def read_studies(book, tabs):
     summary = book.worksheet(SUMMARY).get_all_values()
     logs = book.worksheet(LOGS).get_all_values()
@@ -62,39 +67,34 @@ class ScopedWorksheet:
         values = [[value if value is not None else '' for value in row] + [self.choice]
                   for row in rows]
 
-        def cell(value):
-            if isinstance(value, bool):
-                return {'userEnteredValue': {'boolValue': value}}
-            if isinstance(value, (int, float)):
-                return {'userEnteredValue': {'numberValue': value}}
-            return {'userEnteredValue': {'stringValue': str(value)}}
+        # Anchor table discovery on the Date column, which is populated on
+        # every record, and use the range allocated by the append itself.
+        result = self.sheet.append_rows(values, value_input_option='RAW',
+            insert_data_option='INSERT_ROWS', table_range='A:A')
+        self.owned.update(range_from_append(result, len(rows)))
+        return result
 
-        # Append after the sheet's last populated row without inserting at a
-        # table-relative location. Other collectors must never shift these rows.
-        self.sheet.spreadsheet.batch_update({'requests': [{'appendCells': {
-            'sheetId': self.sheet.id,
-            'rows': [{'values': [cell(value) for value in row]} for row in values],
-            'fields': 'userEnteredValue',
-        }}]})
-        actual = self.sheet.get_all_values(value_render_option='UNFORMATTED_VALUE')
-        width = len(self.headers) + 1
+    def recover_log_rows(self, rows):
+        """Find an append whose response was lost, or append if none landed."""
         key_columns = [self.headers.index(name)
-                       for name in ('Date', 'Entry Time', 'SL %', 'Run Type')
-                       if name in self.headers] + [width - 1]
-        keys = [tuple(row[j] for j in key_columns) for row in values]
-        actual_keys = [tuple(row[j] for j in key_columns) if len(row) >= width else None
-                       for row in actual]
-        matches = [i + 1 for i, key in enumerate(actual_keys)
-                   if key == keys[0] and actual_keys[i:i + len(keys)] == keys]
-        if len(matches) != 1:
-            raise RuntimeError('Could not uniquely locate appended rows; refusing to update')
-        first = matches[0]
-        self.owned.update(range(first, first + len(rows)))
-        last_col = ''
-        while width:
-            width, remainder = divmod(width - 1, 26)
-            last_col = chr(65 + remainder) + last_col
-        return {'updates': {'updatedRange': f"'{self.sheet.title}'!A{first}:{last_col}{first + len(rows) - 1}"}}
+                       for name in ('Date', 'Entry Time', 'SL %', 'Run Type')]
+
+        def key(row):
+            return tuple(str(row[i]) for i in key_columns)
+
+        expected = [key(row) for row in rows]
+        existing = self.get_all_values()[1:]
+        indexed = {k: [] for k in expected}
+        for index, row in enumerate(existing, start=2):
+            if row and key(row) in indexed:
+                indexed[key(row)].append(index)
+        if not any(indexed.values()):
+            return list(range_from_append(self.append_rows(rows), len(rows)))
+        if any(len(indexed[k]) != 1 for k in expected):
+            raise RuntimeError('Partial or duplicate scenario rows; refusing to append again')
+        indexes = [indexed[k][0] for k in expected]
+        self.owned.update(indexes)
+        return indexes
 
     def append_row(self, row, **kwargs):
         return self.append_rows([row])

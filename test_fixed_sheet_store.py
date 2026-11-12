@@ -2,27 +2,20 @@ import copy
 import unittest
 from fixed_sheet_store import ScopedWorksheet, appended_row, reserve_daily, select_choice
 
-class FakeSpreadsheet:
-    def __init__(self, sheet):
-        self.sheet = sheet
-        self.before_append = None
-
-    def batch_update(self, body):
-        if self.before_append:
-            self.sheet.rows.append(self.before_append)
-            self.before_append = None
-        request = body['requests'][0]['appendCells']
-        self.sheet.rows.extend([
-            [next(iter(cell['userEnteredValue'].values())) for cell in row['values']]
-            for row in request['rows']
-        ])
-
 class Sheet:
     def __init__(self):
         self.rows = [['Date', 'Run Status', 'Expiry Choice']]
         self.id = 1
         self.title = 'Summary'
-        self.spreadsheet = FakeSpreadsheet(self)
+        self.before_append = None
+    def append_rows(self, rows, *, value_input_option, insert_data_option, table_range):
+        assert (value_input_option, insert_data_option, table_range) == ('RAW', 'INSERT_ROWS', 'A:A')
+        if self.before_append:
+            self.rows.append(self.before_append)
+            self.before_append = None
+        first = len(self.rows) + 1
+        self.rows.extend(copy.deepcopy(rows))
+        return {'updates': {'updatedRange': f'Summary!A{first}:C{len(self.rows)}'}}
     def get_all_values(self, **kwargs):
         return copy.deepcopy(self.rows)
     def update(self, range_name, values, **kwargs):
@@ -63,11 +56,24 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.raw.rows[1][-1], 'Monthly')
         self.assertEqual(self.raw.rows[3], ['2026-11-10','UPDATED','Current Week'])
     def test_parallel_append_resolves_own_rows_after_another_writer(self):
-        self.raw.spreadsheet.before_append = ['2026-11-10', 'OTHER', 'Next Week']
+        self.raw.before_append = ['2026-11-10', 'OTHER', 'Next Week']
         row = appended_row(self.a.append_row(['2026-11-10', 'CURRENT']))
         self.assertEqual(row, 3)
         self.a.update('A3:B3', [['2026-11-10', 'UPDATED']])
         self.assertEqual(self.raw.rows[1][-1], 'Next Week')
+
+    def test_recover_lost_append_response_without_duplicate(self):
+        headers = ['Date', 'Entry Time', 'SL %', 'Run Type', 'Status']
+        self.raw.rows = [headers + ['Expiry Choice']]
+        existing = ScopedWorksheet(self.raw, headers, 'Current Week')
+        row = ['2026-11-12', '09:30:00', 10, 'SCHEDULED PAPER', 'RUNNING']
+        existing.append_rows([row])
+        writer = ScopedWorksheet(self.raw, headers, 'Current Week')
+        final = row[:-1] + ['COMPLETED']
+        self.assertEqual(writer.recover_log_rows([final]), [2])
+        writer.update('A2:E2', [final])
+        self.assertEqual(len(self.raw.rows), 2)
+        self.assertEqual(self.raw.rows[1][-2], 'COMPLETED')
 
     def test_unknown_append_outcome_fails_closed(self):
         with self.assertRaises(RuntimeError):
