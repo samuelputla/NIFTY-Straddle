@@ -1,4 +1,6 @@
 """Shared fixed-entry tabs: expiry isolation and server-allocated append ranges."""
+import json
+import os
 import re
 
 SUMMARY = 'Straddle Fixed Summary'
@@ -47,6 +49,8 @@ class ScopedWorksheet:
     def __init__(self, sheet, headers, choice):
         self.sheet, self.headers, self.choice = sheet, headers, choice
         self.owned = set()
+        allocations = os.getenv('FIXED_ROW_ALLOCATIONS')
+        self.allocation = json.loads(allocations)[sheet.title][choice] if allocations else None
 
     def get_all_values(self):
         values = self.sheet.get_all_values()
@@ -61,6 +65,19 @@ class ScopedWorksheet:
             raise ValueError('Invalid append rows for worksheet schema')
         values = [[value if value is not None else '' for value in row] + [self.choice]
                   for row in rows]
+
+        if self.allocation is not None:
+            first, count = self.allocation
+            if self.owned or len(rows) != count:
+                raise RuntimeError('Write does not match the collector row allocation')
+            from gspread.utils import rowcol_to_a1
+            last = rowcol_to_a1(first + count - 1, len(self.headers) + 1)
+            address = f'A{first}:{last}'
+            if any(value != '' for row in self.sheet.get(address) for value in row):
+                raise RuntimeError('Allocated rows already contain data')
+            self.sheet.update(range_name=address, values=values, value_input_option='RAW')
+            self.owned.update(range(first, first + count))
+            return {'updates': {'updatedRange': f"'{self.sheet.title}'!{address}"}}
 
         def cell(value):
             if isinstance(value, bool):
@@ -132,3 +149,46 @@ def reserve_daily(sheet, day, headers):
     row[0] = day
     row[headers.index('Run Status')] = 'PREPARING ENTRY'
     return appended_row(sheet.append_row(row))
+
+
+def allocate_session_rows(book, day, test_mode=False):
+    """Plan disjoint ranges once, before any parallel collector starts."""
+    allocations = {}
+    for title, count in ((SUMMARY, 1), (LOGS, 9)):
+        sheet = book.worksheet(title)
+        values = sheet.get_all_values()
+        if not values or values[0][0] != 'Date' or values[0][-1] != 'Expiry Choice':
+            raise RuntimeError(f'Unexpected worksheet layout: {title}')
+        if not test_mode and any(row and row[0] == day for row in values[1:]):
+            raise RuntimeError(f'{title} already contains {day} rows; duplicate run refused')
+        first = len(values) + 1
+        allocations[title] = {choice: [first + i * count, count]
+                              for i, choice in enumerate(CHOICES)}
+        required = first + len(CHOICES) * count - 1
+        if required > sheet.row_count:
+            sheet.resize(rows=required)
+    return allocations
+
+
+if __name__ == '__main__':
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    import gspread
+    from market_calendar import session_allowed
+
+    day = datetime.now(ZoneInfo('Asia/Kolkata')).date().isoformat()
+    test_mode = os.getenv('TEST_MODE') == 'true'
+    allowed, reason = session_allowed(day)
+    if not test_mode and not allowed:
+        print(reason)
+    else:
+        client = gspread.service_account_from_dict(
+            json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT_JSON']),
+            scopes=['https://www.googleapis.com/auth/spreadsheets'],
+        )
+        client.set_timeout((3, 8))
+        book = client.open_by_key('1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI')
+        allocations = allocate_session_rows(book, day, test_mode)
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+            print('rows=' + json.dumps(allocations, separators=(',', ':')), file=output)
