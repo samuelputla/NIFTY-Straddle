@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 from email.utils import parsedate_to_datetime
 from .calendar import session, next_session
 from .research import diagnose, research_history
+from .filings import collect, timestamp
 from .core import IST, RULE, TOP, RULE_SPEC, digest, daily_features, intraday_features, screen, ranked, review_outcome
 from .adapters import Fyers, Sheets, Unavailable, public_get, fetch_universe
 
@@ -60,6 +61,11 @@ def eligible_evidence(rows,now,symbol):
 def return_ranks(rows,metric):
     return {r['symbol']:i+1 for i,r in enumerate(ranked(rows,metric))}
 
+TECHNICAL_FIELDS = ('close', 'volume', 'rvol20', 'sma20', 'sma50', 'rsi14', 'macd',
+                    'signal', 'atr14', 'adx14', 'stoch14', 'resistance', 'support', 'breakout',
+                    'rs20', 'sector_rs', 'weekly', 'trend15', 'trend60', 'vwap', 'poc', 'zone')
+
+
 def evaluate(prior,rows,day,key):
     """Never score an untrusted late/backdated record as a prospective forecast."""
     ranks=return_ranks(rows,'return');by_symbol={r['symbol']:r for r in rows}
@@ -86,6 +92,31 @@ def evaluate(prior,rows,day,key):
             symbol=p['Symbol'];r=by_symbol[symbol];selected=p['Selected'].lower()=='true'
             outcome=review_outcome(selected,ranks[symbol]);hits+=outcome=='HIT'
             diagnostic=diagnose(p,forecast,r,outcome)
+            if outcome == 'MISSED LEADER':
+                try:
+                    frozen = json.loads(p.get('Reasons') or '{}')
+                except (ValueError, TypeError):
+                    frozen = {}
+                if not isinstance(frozen, dict):
+                    frozen = {}
+                diagnostic['known_before_session']['technical_snapshot'] = frozen.get('technical_snapshot', {})
+                diagnostic['observed_during_session']['technical_snapshot'] = {
+                    field: r.get(field) for field in TECHNICAL_FIELDS}
+                cutoff = datetime.fromisoformat(p['Created At'])
+                context = r.get('exchange_research', {})
+                evidence = {}
+                for category in ('announcements', 'financial_filings'):
+                    known, later = [], []
+                    for item in context.get(category, []):
+                        published = timestamp(item.get('published_at'))
+                        if published:
+                            (known if published <= cutoff else later).append(item)
+                    evidence[category] = {'public_by_forecast_cutoff': known,
+                                          'public_after_forecast_cutoff': later}
+                diagnostic['exchange_research'] = evidence
+                diagnostic['research_gaps'] = context.get('gaps', ['Exchange research not collected'])
+                if not diagnostic['known_before_session']['technical_snapshot']:
+                    diagnostic['research_gaps'] = [*diagnostic['research_gaps'], 'Older forecast has no frozen technical snapshot']
             explanation=json.dumps(diagnostic,sort_keys=True)
             reviews.append([key+':'+fid+':'+symbol,day,fid,symbol,selected,ranks[symbol],r['return'],r['gap'],r['intraday'],outcome,explanation,p['Rule Version']])
             if outcome in ('FALSE POSITIVE','MISSED LEADER'):
@@ -181,6 +212,15 @@ def execute(connection_check=False):
         if not peers:
             r['coverage']+='; no industry peers, sector feature neutral'
     scoring=screen(rows)
+    prior_forecasts = sheet.records('Study Forecasts')
+    prior_picks = {p['Symbol'] for p in prior_forecasts if p.get('Target Session') == day
+                   and str(p.get('Selected')).lower() == 'true'}
+    research_symbols = {r['symbol'] for r in ranked(rows,'return')[:TOP]} - prior_picks if prior_picks else set()
+    research_as_of = min(datetime.now(IST), datetime.fromisoformat(day+'T23:59:59+05:30'))
+    research = dict(collect(research_symbols, research_as_of, day)) if research_symbols else {}
+    for r in rows:
+        if r['symbol'] in research:
+            r['exchange_research'] = research[r['symbol']]
     completed=datetime.now(IST)
     if completed>=target_open:
         raise Unavailable('Forecast cutoff missed; no prospective forecast published')
@@ -189,10 +229,11 @@ def execute(connection_check=False):
                        'derived_features_and_evidence':rows})
     fid=day+':'+target+':'+RULE
     actual_ranks=return_ranks(rows,'return');momentum=return_ranks(rows,'momentum20');sector=return_ranks(rows,'sector20')
-    reviews,changes,evaluation=evaluate(sheet.records('Study Forecasts'),rows,day,key)
+    reviews,changes,evaluation=evaluate(prior_forecasts,rows,day,key)
     forecast=[];observations=[]
     for rank,r in enumerate(scoring,1):
-        reasons=json.dumps({'features':{k:r[k] for k in RULE_SPEC['weights']},'score_parts':r['parts']},sort_keys=True)
+        reasons=json.dumps({'features':{k:r[k] for k in RULE_SPEC['weights']},'score_parts':r['parts'],
+                            'technical_snapshot':{field:r.get(field) for field in TECHNICAL_FIELDS}},sort_keys=True)
         forecast.append([fid,day,target,completed.isoformat(),RULE,universe_hash,input_hash,r['symbol'],rank,rank<=TOP,r['score'],reasons,r['coverage'],actual_ranks[r['symbol']],momentum[r['symbol']],sector[r['symbol']]])
         observations.append([key,day,r['symbol'],r['industry'],actual_ranks[r['symbol']],r['return'],r['gap'],r['intraday'],r['close'],r['volume'],r['rvol20'],r['sma20'],r['sma50'],r['rsi14'],r['macd'],r['signal'],r['atr14'],r['adx14'],r['stoch14'],r['resistance'],r['support'],r['breakout'],r['rs20'],r['sector_rs'],r['weekly'],r['trend15'],r['trend60'],r['vwap'],r['poc'],r['zone'],r['score'],json.dumps(r['evidence']),r['coverage']])
     leader_context=[{'symbol':r['symbol'],'return_pct':r['return'],'gap_pct':r['gap'],'open_to_close_pct':r['intraday'],
@@ -207,7 +248,7 @@ def execute(connection_check=False):
     findings={'research_history':history,'shortlist_review':focused_reviews,'leaders':[r['symbol'] for r in ranked(rows,'return')[:TOP]],'leader_context':leader_context,'next_candidates':[r['symbol'] for r in scoring[:TOP]],
               'evaluations':evaluation,'limitations':issues+['Exploratory price-volume-v1; no validated edge',
               'Industry peer basket is a proxy, not official sector index', 'Volume profile and VWAP approximated from 15-minute candles',
-              'No automatic fundamental extraction or causal news verification; Study Evidence requires reviewed sources',
+              'NSE filing and XBRL coverage is best effort; announcement descriptions are leads, and causation is unresolved',
               'Order-block zones are experimental; full weekly/multisession intraday study remains manual',
               'No automatic rule/skill promotion; misses create review proposals'], 'session_kind':hours['kind']}
     save('report.json',{'created_at':completed.isoformat(),'findings':findings,'observations':rows,'forecast':forecast,'reviews':reviews,'input_hash':input_hash})
@@ -220,7 +261,7 @@ def execute(connection_check=False):
         '## Continuous research record',json.dumps(history,indent=2),'## Coverage and limitations',*['- '+x for x in findings['limitations']]]
     (OUT/'report.md').write_text('\n\n'.join(md),encoding='utf-8')
     sheet.publish(key,{'Study Observations':observations,'Study Forecasts':forecast,'Study Reviews':reviews,
-                       'Study Evidence':news,'Study Changes':changes,'Study Runs':[[key,day,completed.isoformat(),'COMPLETED',50,target,RULE,input_hash,json.dumps(findings),run_url()]]})
+                       'Study Evidence':news,'Study Changes':changes,'Study Runs':[[key,day,completed.isoformat(),'COMPLETED',50,target,RULE,input_hash,json.dumps({**findings, 'shortlist_review': [{**review, 'analysis': {k:v for k,v in review['analysis'].items() if k != 'exchange_research'}} for review in focused_reviews]}),run_url()]]})
     return {'status':'COMPLETED','session':day,'target':target,'leaders':findings['leaders'],'candidates':findings['next_candidates']}
 
 def run_url():
