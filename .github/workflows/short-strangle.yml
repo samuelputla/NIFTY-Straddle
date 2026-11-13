@@ -1,4 +1,5 @@
 name: Short Strangle Paper Research
+run-name: Short Strangle ${{ (github.event_name == 'push' || github.event.schedule == '35 9 * * 1-5' || inputs.mode == 'verify') && 'verify' || 'collect' }}
 on:
   workflow_dispatch:
     inputs:
@@ -53,6 +54,14 @@ jobs:
           path: short_strangle_output/
           if-no-files-found: ignore
           retention-days: 30
+      - name: Preserve optional entry and margin evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-strangle-option-observations-${{ github.run_id }}
+          path: option_observations/
+          if-no-files-found: ignore
+          retention-days: 30
   verify:
     if: ${{ github.event_name == 'push' || (github.event_name == 'schedule' && github.event.schedule == '35 9 * * 1-5') || (github.event_name == 'workflow_dispatch' && inputs.mode == 'verify') }}
     runs-on: ubuntu-latest
@@ -88,3 +97,4 @@ jobs:
           path: option_observations/
           if-no-files-found: ignore
           retention-days: 30
+

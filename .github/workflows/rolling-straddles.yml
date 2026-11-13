@@ -1,4 +1,5 @@
 name: Time & Delta Based Straddles
+run-name: Time and Delta ${{ inputs.setup_only && 'setup' || 'collect' }}
 on:
   workflow_dispatch:
     inputs:
@@ -36,7 +37,7 @@ jobs:
           allowed = datetime.now(tz).time() < time(9,35)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write("allowed=" + ("true" if allowed else "false") + "\n")
-          if not allowed: print("Late scheduled start skipped; no new collector or position")
+          if not allowed: raise SystemExit("MISSED START WINDOW: no collector ran; inspect the morning run and Sheet coverage")
           PY
   track:
     if: ${{ inputs.setup_only || needs.wait-for-session.outputs.allowed == 'true' }}
@@ -85,3 +86,4 @@ jobs:
           path: option_observations/
           if-no-files-found: ignore
           retention-days: 30
+

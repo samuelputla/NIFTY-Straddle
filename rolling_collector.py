@@ -59,13 +59,10 @@ def main():
  lock=threading.RLock();prices={};chains={};subscriptions=set();connected=threading.Event();ever_connected=False;disconnected=None
  metadata_notes=[];vix_result={};vix_started=False;reset_diagnostics={};reset_attempts={}
  def fetch_vix():
-  # Optional context runs independently; it cannot block entry/reset quote processing.
-  try:
-   response=call('quotes',{'symbols':'NSE:INDIAVIX-INDEX'})
-   value=quote_prices(response,['NSE:INDIAVIX-INDEX'])['NSE:INDIAVIX-INDEX']
-   with lock:vix_result.update(value=value,at=now().isoformat())
-  except Exception as error:
-   with lock:vix_result.update(error=type(error).__name__,at=now().isoformat())
+  # Bounded retries run off the quote-processing thread.
+  from vix_snapshot import capture_vix
+  result=capture_vix(call)
+  with lock:vix_result.update(result)
  def on_message(message):
   if not isinstance(message,dict):return
   symbol=message.get('symbol');price=message.get('ltp')
@@ -253,6 +250,7 @@ def main():
   time.sleep(.5)
  if hasattr(socket,'close_connection'):socket.close_connection()
 if __name__=='__main__':main()
+
 
 
 

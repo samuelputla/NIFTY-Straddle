@@ -1,0 +1,50 @@
+name: Paper Session Fallback
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check only; do not dispatch collectors
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths: ['.automation/cloud-wakeup.json']
+  schedule:
+    # Backup only. Independent cloud wake-ups use the push path above.
+    - cron: '27,37,47 3 * * 1-5'
+    - cron: '37 9 * * 1-5'
+    - cron: '2,17 11 * * 1-5'
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: paper-session-fallback
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install requests gspread tzdata
+      - name: Dispatch only missing due paper workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python session_control.py --dry-run
+          else
+            python session_control.py
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: session-control-${{ github.run_id }}
+          path: session-control-report.json
+          if-no-files-found: ignore
+
