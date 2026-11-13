@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from option_basket_margin import TAB as MARGIN_TAB, HEADERS as MARGIN_HEADERS, estimate_margin
+
 IST = ZoneInfo('Asia/Kolkata')
 INDEX = 'NSE:NIFTY50-INDEX'
 ENTRY_TAB = 'Option Entry Snapshots'
@@ -41,13 +43,15 @@ def candle_high(response, day):
             'minutes':len(bars),'coverage':'COMPLETE MINUTE BARS' if complete else 'PARTIAL / CONFLICTING MINUTE BARS'}
 
 class Observer:
-    def __init__(self, book, call, day, source, enabled=True):
+    def __init__(self, book, call, day, source, enabled=True, quantity=65):
         self.book,self.call,self.day,self.enabled=book,call,day,enabled
+        self.quantity=quantity
         self.out=Path('option_observations')/source
         self.out.mkdir(parents=True,exist_ok=True)
         self.lock=threading.RLock();self.io_lock=threading.Lock()
         self.entries={};self.snapshots={};self.ticks={};self.candles={};self.context={};self.history={}
         self.futures=[];self.pool=ThreadPoolExecutor(max_workers=1)
+        self.margin_entries={};self.margin_cache={};self.margin_results={}
         self.cache={};self.next_request=0;self.pending_publish=None
         if enabled:self.futures.append(self.pool.submit(self._context))
 
@@ -84,8 +88,29 @@ class Observer:
         with self.lock:
             if key in self.entries:return
             self.entries[key]=dict(key=key,family=family,choice=choice,expiry=expiry,pct=pct,cycle=cycle,side=side,symbol=symbol,entry_at=entry_at,premium=premium,stop=stop,exit_at='',reason='',crossing='')
+            basket_key = (family, choice, expiry, pct, cycle)
+            basket = self.margin_entries.setdefault(basket_key, {})
+            basket[side] = (symbol, entry_at)
+            if set(basket) == {'CE', 'PE'}:
+                symbols = tuple(basket[leg][0] for leg in ('CE', 'PE'))
+                at = max(basket[leg][1] for leg in basket)
+                self.futures.append(self.pool.submit(self._margin, basket_key, symbols, at))
             self.futures.append(self.pool.submit(self._snapshot,key))
         self.tick(symbol,premium,entry_at)
+
+    def _margin(self, basket_key, symbols, at):
+        # Coalesce equivalent entry snapshots while still re-estimating on rolls.
+        cache_key = (symbols, at[:19])
+        if cache_key not in self.margin_cache:
+            time.sleep(max(0, self.next_request - time.monotonic()))
+            self.next_request = time.monotonic() + 1.1
+            amount, status = estimate_margin(symbols, self.quantity)
+            self.margin_cache[cache_key] = (stamp(), amount, status)
+        captured, amount, status = self.margin_cache[cache_key]
+        key = '|'.join(map(str, (self.day, *basket_key)))
+        with self.lock:
+            self.margin_results[key] = [key, self.day, *basket_key, at, *symbols,
+                                        self.quantity, 'INTRADAY', captured, amount, status]
 
     def exited(self, family,choice,pct,cycle,side,at,reason):
         key='|'.join(map(str,(self.day,family,choice,pct,cycle,side)))
@@ -180,6 +205,10 @@ class Observer:
             writer=EvidenceWriter(self.book)
             writer.save(ENTRY_TAB,ENTRY_HEADERS,entries,update=True)
             writer.save(HIGH_TAB,HIGH_HEADERS,highs,update=True)
+            with self.lock:
+                margins = list(self.margin_results.values())
+            self._raw('basket_margins.json', margins)
+            writer.save(MARGIN_TAB,MARGIN_HEADERS,margins,update=True)
 
     def finish(self):
         if not self.enabled:self.pool.shutdown(wait=False);return
