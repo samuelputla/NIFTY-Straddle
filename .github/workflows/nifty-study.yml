@@ -31,16 +31,9 @@ jobs:
           path = Path('nifty_study/run.py')
           source = path.read_text()
           source = source.replace("day=str(now.date());OUT.mkdir", "day='2026-11-12';OUT.mkdir", 1)
-          source = source.replace("        raise Unavailable('Forecast cutoff missed; no prospective forecast published')", "        issues.append('Forecast cutoff missed; only retrospective observations and reviews will be published')")
-          source = source.replace("    sheet.publish(key,{'Study Observations'", """    late = datetime.now(IST) >= target_open
-          if late:
-              forecast.clear()
-              findings['next_candidates'] = []
-              findings['limitations'].append('Forecast cutoff missed; no prospective shortlist published')
-              save('report.json', {'created_at':completed.isoformat(),'findings':findings,'observations':rows,'forecast':forecast,'reviews':reviews,'input_hash':input_hash})
-              report = OUT/'report.md'
-              report.write_text(report.read_text(encoding='utf-8').replace('## Next-session paper candidates\\n\\n'+', '.join(r['symbol'] for r in scoring[:TOP]), '## Next-session paper candidates\\n\\nNone: forecast cutoff missed'), encoding='utf-8')
-          sheet.publish(key,{'Study Observations'""")
+          source = source.replace("    if completed>=target_open:\n        raise Unavailable('Forecast cutoff missed; no prospective forecast published')", "    late = completed >= target_open\n    if late:\n        issues.append('Forecast cutoff missed; observations and reviews only')", 1)
+          source = source.replace("    save('report.json',", "    if late:\n        forecast.clear()\n        findings['next_candidates'] = []\n    save('report.json',", 1)
+          source = source.replace("    sheet.publish(key,{'Study Observations'", "    if datetime.now(IST) >= target_open:\n        forecast.clear()\n        findings['next_candidates'] = []\n    sheet.publish(key,{'Study Observations'", 1)
           compile(source, str(path), 'exec')
           path.write_text(source)
           PY
