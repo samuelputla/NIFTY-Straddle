@@ -1,0 +1,35 @@
+name: Verify FYERS basket margin
+on:
+  push:
+    branches: [verify-fyers-basket-margin]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install requests
+      - name: Estimate two existing paper baskets without placing orders
+        env:
+          FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+        run: |
+          python - <<'PY'
+          from option_basket_margin import estimate_margin
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          baskets = {
+              'Fixed Current Week': ('NSE:NIFTY26N1725350CE', 'NSE:NIFTY26N1725350PE'),
+              'Fixed Next Week': ('NSE:NIFTY26NOV25350CE', 'NSE:NIFTY26NOV25350PE'),
+          }
+          successful = True
+          for name, symbols in baskets.items():
+              amount, status = estimate_margin(symbols, 65)
+              print(datetime.now(ZoneInfo('Asia/Kolkata')).isoformat(), name, amount, status)
+              successful &= bool(amount)
+          raise SystemExit(0 if successful else 1)
+          PY
