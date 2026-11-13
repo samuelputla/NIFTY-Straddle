@@ -1,19 +1,9 @@
 name: Nifty study
-run-name: Nifty equity study Â· ${{ github.event_name }}
+run-name: Recover 12 November Nifty Study
 on:
-  schedule:
-    # 16:30 IST every day, including special sessions. Unknown calendars fail closed.
-    - cron: '0 11 * * *'
-  workflow_dispatch:
-    inputs:
-      connection_check:
-        description: Check FYERS history, constituent source and Sheet access without a forecast
-        type: boolean
-        default: false
   push:
-    paths:
-      - '.github/workflows/nifty-study.yml'
-      - 'nifty_study/**'
+    branches: [recover-nov12-nifty-study]
+    paths: ['.github/workflows/nifty-study.yml']
 permissions:
   contents: read
 concurrency:
@@ -35,15 +25,26 @@ jobs:
       - name: Verify deterministic study logic
         run: python -m unittest discover -s nifty_study/tests -v
       - name: Collect, study and publish
-        if: github.event_name != 'push'
-        env:
-          CHECK_CONNECTION: ${{ inputs.connection_check }}
         run: |
-          if [ "$CHECK_CONNECTION" = "true" ]; then
-            python -m nifty_study.run --connection-check
-          else
-            python -m nifty_study.run
-          fi
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('nifty_study/run.py')
+          source = path.read_text()
+          source = source.replace("day=str(now.date());OUT.mkdir", "day='2026-11-12';OUT.mkdir", 1)
+          source = source.replace("        raise Unavailable('Forecast cutoff missed; no prospective forecast published')", "        issues.append('Forecast cutoff missed; only retrospective observations and reviews will be published')")
+          source = source.replace("    sheet.publish(key,{'Study Observations'", """    late = datetime.now(IST) >= target_open
+          if late:
+              forecast.clear()
+              findings['next_candidates'] = []
+              findings['limitations'].append('Forecast cutoff missed; no prospective shortlist published')
+              save('report.json', {'created_at':completed.isoformat(),'findings':findings,'observations':rows,'forecast':forecast,'reviews':reviews,'input_hash':input_hash})
+              report = OUT/'report.md'
+              report.write_text(report.read_text(encoding='utf-8').replace('## Next-session paper candidates\\n\\n'+', '.join(r['symbol'] for r in scoring[:TOP]), '## Next-session paper candidates\\n\\nNone: forecast cutoff missed'), encoding='utf-8')
+          sheet.publish(key,{'Study Observations'""")
+          compile(source, str(path), 'exec')
+          path.write_text(source)
+          PY
+          python -m nifty_study.run
       - name: Preserve raw inputs, frozen forecast and report
         if: always()
         uses: actions/upload-artifact@v4
