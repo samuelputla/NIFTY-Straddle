@@ -1,51 +1,28 @@
-# Unattended paper collection and validation
+# Paper workflow scheduling and fallback
 
-This setup does not place broker orders. It preserves existing collectors, their own concurrency locks, 09:35 entry cutoff, prices and Sheet records.
+GitHub cron is best effort, not an exact-time service. On 12 November the 08:55 IST Fixed and Rolling schedules were created around 17:00 IST. Manual morning runs supplied the actual observations. A successful skipped workflow is not evidence of a collected session.
 
-## Independent cloud trigger
+## Independent cloud wake-up
 
-A Sites-linked cloud task uses the owner's connected GitHub tool, not a laptop/browser session. Each weekday at09:07 and16:07 Asia/Kolkata it reads this file and updates only `.automation/request.json` on `main` using its current blob SHA. It writes JSON containing `kind` (`start` before09:25 or `audit` after16:07), `date` (current IST YYYY-MM-DD), and `issued_at` (current timezone-aware ISO timestamp). Do not write secrets. Do not create pull requests for this tiny authorized trigger update. Never modify workflow files or collector code during scheduled runs.
+The owner-authorized cloud scheduled task updates only `.automation/cloud-wakeup.json` on main with current IST `date` and timezone-aware `issued_at`, using the existing blob SHA. Never store credentials in this file. Its push starts `Paper Session Fallback` (`session-control.yml`). This request is accepted for 15 minutes only. A local Codex reminder is not an independent cloud scheduler.
 
-The file's push starts `Automatic Session Control` independently of GitHub cron delivery. Its allowlisted controller rechecks GitHub runs and current Sheet dates. It never dispatches a queued/running/current-day workflow twice, never retries a failed/partial session automatically, and refuses morning dispatches after09:25. The existing collector09:35 cutoff remains intact. A `healthcheck` request reads workflow visibility only; it does not dispatch or touch market data. `disabled` is the inert installation value.
+The controller reads Actions and summary dates before dispatching due workflows. Active runs, current-day completed or failed runs, and existing option summary rows prevent blind restarts. Failed or partial collections require review. Morning collectors are never dispatched after their cutoff. Short Term Calls may run again after 14 minutes; its workflow lock serializes writers. The close check is distinguished from morning Strangle collection by its run title.
 
-Morning targets: `straddle.yml`, `rolling-straddles.yml`, `daily-straddle-research.yml`; main only; test_mode=false/setup_only=false. Evening target: `eod-validation.yml`. GitHub's original schedules remain fallback triggers. A racing request is protected by existing workflow concurrency and the collectors' Sheet duplicate guards. Do not claim a204/click means tracking began: check the resulting controller report and new workflow/job IDs.
+| Workflow | Native target IST | Fallback window IST |
+| --- | --- | --- |
+| Fixed Entry | 08:55 weekdays | 08:55 to before 09:25 |
+| Time and Delta | 08:55 weekdays | 08:55 to before 09:25 |
+| Short Strangle collect | 09:10 weekdays | 09:10 to before 09:25 |
+| ABC paper | 08:55 weekdays | 08:55 to before 09:10 |
+| Short Strangle verify | 15:05 weekdays | 15:07 to before 18:00 |
+| Nifty Study | 16:30 daily | 16:30 to before 23:30 normal weekdays |
+| Short Term Calls | 08:50, 09:05; every 15 minutes 09:20–15:35; 16:05, 18:05 weekdays | 08:50 to before 18:30, no more than once per 14 minutes |
 
-If the cloud task cannot access GitHub tools, it must report missing access and stop. It must not fall back to a laptop/browser or repeatedly dispatch. If it starts outside the morning window, it must not start paper positions. GitHub runner availability and the cloud task's own scheduling are still best effort. The first future cloud occurrence is not proven by successful installation or an author-session test.
+Fallback GitHub crons are additional attempts, not an independent timing guarantee. The independent cloud task must be saved, connected to GitHub with write access, and tested separately. A dispatch acceptance is not a completed collection. Inspect `session-control-report.json`, target jobs and the Sheet. Future scheduling remains unverified until its first occurrence.
 
-## Daily Historical Validation
+## Audit findings and data limits
 
-GitHub cron aims at16:07 IST (10:37 UTC). The independent16:07 cloud request supplies a separate trigger if no current-date validation run exists. This job has read-only repository permission and read-only Google Sheets credentials. It downloads each unique current contract's1-minute history once per audit, checks all nine studies, and saves report.json/report.md, Sheet source evidence and raw history as a30-day artifact. Original trade records and dashboard P&L are never overwritten. It does not use the expired-data endpoint or reset any quota ledger.
+Collectors are paper-only. No broker order endpoint is authorized. The option observer captures entry Greeks/depth and 09:30–15:00 highs, with actual timing and availability. Missing historical entry Greeks cannot be recreated from a current API quote. Historical margin has no as-of calculator; current verification amounts must not become historical entry margins.
 
-Checks include session completeness, duplicate cycles, expiry/DTE, ATM against recorded spot and entry-minute range, entry/reset/exit chronology, leg SL threshold consistency, missed minute-high crossings, full cycle candle coverage, arithmetic and assumedRs150/cycle costs. Saved delta entry/roll fields can be checked for strict change>0.35 and replacement neutrality; OHLC cannot independently prove the original continuous delta path. Historical/candle reconstructions remain identified. Quote ranges cannot prove second-level executable fills. Entry-minute SL ordering is explicitly limited.
-
-Results: PASSED (available checks consistent, with listed limitations), REVIEW (record/rule/price discrepancy), DATA UNAVAILABLE (not enough source evidence). Authentication or structural/arithmetic errors fail the job so its normal GitHub failure mechanisms apply. Reports do not guarantee email delivery or broker execution. Market calendar is verified7Octâ€“31Dec2026 from NSEFAOP71777; unknown dates fail closed. Existing collectors also need their calendars maintained for2027. FYERS access may require renewal; no automatic credential bypass is attempted.
-
-To inspect: Actions â†’ Daily Historical Validation â†’ latest run â†’ Job summary or daily-validation artifact. For one-off historical verification, audit_date accepts a past session date. It never starts positions. No manual trigger is required for the saved daily schedules.
-
-
-
-## Additional research workflow health
-
-Automatic Session Control now checks `short-strangle.yml` and `nifty-study.yml`
-read-only whenever its existing cloud control request runs, and through its own
-09:20 and 17:20 IST daily cron. Manual `check_new_workflows=true` runs only this
-inspection, regardless of the default probe checkbox. It never starts or restarts
-these two collectors. Their original schedules remain 09:10 and 16:30 IST.
-
-Before preparation grace ends the report says NOT DUE, not failed. Short Strangle
-is expected started by 09:20 and completed by 15:15. Nifty study is expected started
-by 16:40 and completed by 17:05. Use each workflow's own market calendar; the
-8 November equity special session is not treated as a normal F&O session.
-Only schedule/manual executions count; equity push tests do not count as collection.
-The report includes current-day run links and failed job/step names. Missing,
-queued, failed, overdue, ambiguous or inaccessible executions fail the health job
-so configured GitHub notifications can surface them. Notifications require the
-user's GitHub settings; delivery is not guaranteed. SUCCESS means job execution,
-not independent validation of forecast quality, prices or published Sheet rows.
-
-Inspect the run summary and workflow-health.json/md artifacts. GitHub cron is still
-best effort; these checks are not an independent real-time scheduler. Existing
-09:07/16:07 cloud controls also include status checks, but a separate post-16:30
-cloud wake-up is not configured by this change. Failed or partial runs need review,
-not blind reruns. No core strategy or broker permissions were changed.
+Retired Automatic Session Control / Daily Historical Validation workflows are not installed. Old `automation_dispatch.py` / `workflow_health.py` are historical helpers, not proof of an active schedule. Calendar checks fail closed outside their verified 2026 interval and need updating before 2027.
 

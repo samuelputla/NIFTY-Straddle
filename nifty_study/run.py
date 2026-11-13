@@ -132,7 +132,8 @@ def evaluate(prior,rows,day,key):
     return reviews,changes,summaries
 
 def execute(connection_check=False):
-    now=datetime.now(IST);day=str(now.date());OUT.mkdir(exist_ok=True)
+    from .session_date import collection_day
+    now=datetime.now(IST);day=collection_day(now,scheduled=os.getenv('GITHUB_EVENT_NAME')=='schedule' and not connection_check);OUT.mkdir(exist_ok=True)
     sheet=Sheets()
     key=('connection-equities:' if connection_check else 'daily:')+day+':'+RULE
     if sheet.has_run(key):
@@ -299,4 +300,5 @@ def main():
 
 if __name__=='__main__':
     sys.exit(main())
+
 

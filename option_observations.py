@@ -194,7 +194,7 @@ class Observer:
             holding_high=max((b[2] for b in held),default='')
             hit=bool(e['crossing']) or (holding_high!='' and holding_high>=e['stop'])
             evidence='SL HIT: premium >= stop, including jumps over stop' if hit else 'NO CROSSING OBSERVED; boundary minutes / missing feed may be unresolved'
-            high_rows.append(base+[e['stop'],e['exit_at'],e['reason'],self.day+'T09:30:00+05:30',self.day+'T15:00:00+05:30',t.get('high',''),t.get('at',''),t.get('count',0),t.get('gap',''),h.get('high',''),h.get('at',''),h.get('minutes',0),330,h.get('coverage','LIVE SAMPLED; FULL WINDOW NOT VERIFIED'),high,high>=e['stop'] if high!='' else '',e['crossing'],'Full-window crossing may precede entry or follow exit. Holding-window crossing is separate; paper threshold fills are not executable fill proof.',e['premium'],holding_high,True if hit else '',round((e['premium']-e['stop'])*65,2) if hit else '',evidence])
+            high_rows.append(base+[e['stop'],e['exit_at'],e['reason'],self.day+'T09:30:00+05:30',self.day+'T15:00:00+05:30',t.get('high',''),t.get('at',''),t.get('count',0),t.get('gap',''),h.get('high',''),h.get('at',''),h.get('minutes',0),330,h.get('coverage','LIVE SAMPLED; FULL WINDOW NOT VERIFIED'),high,high>=e['stop'] if high!='' else '',e['crossing'],'Full-window crossing may precede entry or follow exit. Holding-window crossing is separate; paper threshold fills are not executable fill proof.',e['premium'],holding_high,True if hit else '',round((e['premium']-e['stop'])*self.quantity,2) if hit else '',evidence])
         return entry_rows,high_rows
 
     def publish(self):
@@ -224,3 +224,4 @@ class Observer:
                 self._raw('history-'+symbol.replace(':','_')+'.json',r)
             except Exception as ex:self.candles[symbol]={'coverage':'UNAVAILABLE '+type(ex).__name__}
         self.publish()
+
