@@ -7,11 +7,13 @@ from statistics import mean, median
 
 from nifty_study.adapters import Fyers, IST, Sheets, Unavailable, fetch_universe
 from nifty_study.calendar import session
+from opening_momentum.review import METRICS, build_review, feature_percentile
 
 OUT = Path("opening-momentum-report")
 RUNS = "Opening Momentum Runs"
 PICKS = "Opening Momentum Picks"
 RESULTS = "Opening Momentum Results"
+REVIEW = "Opening Momentum Review"
 VERSION = "v1"
 COST = 0.001  # 10 basis points round trip, including slippage
 
@@ -22,6 +24,8 @@ class MomentumSheets(Sheets):
         self.schema = {
             RUNS: ["Run Key", "Session", "Phase", "Recorded At", "Rule", "Details", "GitHub Run"],
             PICKS: ["Session", "Frozen At", "List", "Rank", "Symbol", "Features"],
+            REVIEW: ["Session", "Symbol", "Outcome", "Closing Rank", "Opening Rank",
+                     "Selection Diagnosis", "Evidence"],
             RESULTS: ["Session", "List", "Symbol", "Closing Rank", "Hit", "Entry Time",
                       "Entry", "Exit", "Exit Reason", "Net Return %"],
         }
@@ -82,12 +86,9 @@ def rank_opening(features, industries):
         grouped.setdefault(industries[symbol], []).append(row["from_open"])
     for symbol, row in features.items():
         row["sector_strength"] = median(grouped[industries[symbol]])
-    metrics = ("from_open", "gap_held", "relative_volume", "range_break", "sector_strength")
     for row in features.values():
         row["score"] = mean(
-            mean((row[metric] > peer[metric]) + 0.5 * (row[metric] == peer[metric])
-                 for peer in features.values())
-            for metric in metrics
+            feature_percentile(row, features.values(), metric) for metric in METRICS
         )
     return sorted(features, key=lambda symbol: (-features[symbol]["score"], symbol))
 
@@ -193,13 +194,14 @@ def execute(phase):
         selected = {row["Symbol"] for row in logs}
         if sum(row["List"] == "Opening" for row in logs) != 5:
             raise Unavailable("Incomplete frozen opening shortlist")
-        returns, trades = {}, {}
+        returns, trades, bars_by_symbol = {}, {}, {}
         for symbol in symbols:
             bars = fyers.history(f"NSE:{symbol}-EQ", str(day), "5", 10)
             closes = [bar for bar in bars if timestamp(bar).time() == time(15, 25)]
             if len(closes) < 2 or timestamp(closes[-1]).date() != day:
                 raise Unavailable("Closing rank missing data for " + symbol)
             returns[symbol] = closes[-1][4] / closes[-2][4] - 1
+            bars_by_symbol[symbol] = bars
             if symbol in selected:
                 trades[symbol] = paper_trade(bars, entry_time)
         leaders = sorted(symbols, key=lambda symbol: (-returns[symbol], symbol))
@@ -209,7 +211,13 @@ def execute(phase):
              entry_time.isoformat(), *trades[symbol]]
             for row in logs for symbol in [row["Symbol"]]
         ]
-        tables = {RESULTS: results}
+        picks = [row["Symbol"] for row in sorted(logs, key=lambda row: int(row["Rank"]))
+                 if row["List"] == "Opening"]
+        reviews = build_review(day, cutoff, frozen, ranks, picks, bars_by_symbol, trades, fyers)
+        tables = {RESULTS: results, REVIEW: reviews}
+        (OUT / "review.json").write_text(
+            json.dumps([json.loads(row[-1]) | {"symbol": row[1], "outcome": row[2]}
+                        for row in reviews], indent=2), encoding="utf-8")
         detail = {"closing_top_five": leaders[:5], "closing_returns": returns,
                   "comparison_eligible": len(logs) == 10, "lists": {}}
         for label in ("Opening", "Evening"):
@@ -225,9 +233,8 @@ def execute(phase):
     OUT.mkdir(exist_ok=True)
     (OUT / "summary.json").write_text(detail_json, encoding="utf-8")
     url = f"{os.getenv('GITHUB_SERVER_URL')}/{os.getenv('GITHUB_REPOSITORY')}/actions/runs/{os.getenv('GITHUB_RUN_ID')}"
-    sheet_detail = {name: value for name, value in detail.items() if name != "opening_features"}
     tables[RUNS] = [[key, str(day), phase, datetime.now(IST).isoformat(), VERSION,
-                     json.dumps(sheet_detail, sort_keys=True), url]]
+                     detail_json, url]]
     if phase == "freeze" and datetime.now(IST) >= deadline:
         raise Unavailable("Opening shortlist publication window missed")
     sheet.publish(key, tables)
