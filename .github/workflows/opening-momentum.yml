@@ -1,0 +1,57 @@
+name: Opening Momentum
+
+on:
+  schedule:
+    # Prepare before the 09:45 IST cutoff and wait for completed bars.
+    - cron: '10 4 * * 1-5'
+    - cron: '10 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Opening freeze or closing evaluation for the current IST date
+        type: choice
+        options:
+          - freeze
+          - evaluate
+        required: true
+  pull_request:
+    paths:
+      - 'opening_momentum/**'
+      - '.github/workflows/opening-momentum.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'opening_momentum/**'
+      - '.github/workflows/opening-momentum.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opening-momentum
+  cancel-in-progress: false
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r nifty_study/requirements.txt
+      - run: python -m unittest discover -s opening_momentum -v
+      - name: Collect and publish paper research
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PHASE: ${{ inputs.phase || (github.event.schedule == '10 4 * * 1-5' && 'freeze' || 'evaluate') }}
+        run: python -m opening_momentum.run "$PHASE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opening-momentum-${{ github.run_id }}
+          path: opening-momentum-report/
+          if-no-files-found: ignore
