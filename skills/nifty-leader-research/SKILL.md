@@ -1,6 +1,6 @@
 ---
 name: nifty-leader-research
-description: Research conditions preceding NIFTY 50 daily leaders, build timestamped next-session paper shortlists, and score them against all constituents and simple benchmarks. Use for the Top Gainers study, CSV audits, FYERS research collection, and forward evaluation.
+description: Research conditions preceding NIFTY 50 daily leaders, build timestamped next-session paper shortlists, and score them against all constituents and simple benchmarks. Use for the Top Gainers study, CSV audits, FYERS research collection, forward evaluation, and Opening Momentum missed-leader reviews.
 ---
 
 # NIFTY leader research
@@ -27,6 +27,8 @@ Use the [daily review loop](references/daily-review.md) for the user's post-sess
 4. Explore leaders against non-leaders over many sessions. Record each hypothesis and attempted variant. Do not claim causality from a winning-stock narrative. Separate exploratory results from chronological holdout and forward tests.
 5. Before the target session, freeze the rule version, eligible inputs, cutoff, candidate list, scores, exclusions and creation timestamp in an append-only research record. Hash the inputs and rule specification. Late records are retrospective and cannot enter forward statistics. Scores are not calibrated probabilities.
 6. After the target session, join outcomes to the original frozen record and evaluate all forecasts, including failures and empty shortlists. Never overwrite a forecast with revised selections. Report coverage gaps and sample size with results.
+
+For Opening Momentum, follow the [opening review](references/daily-review.md#opening-momentum-review) to explain missed leaders and paper-trade outcomes using the frozen 09:45 IST inputs.
 
 ## Reporting
 

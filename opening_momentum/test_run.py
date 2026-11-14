@@ -38,3 +38,28 @@ class MomentumTests(unittest.TestCase):
         _, exit_price, reason, net = paper_trade(bars, entry)
         self.assertEqual((exit_price, reason), (99, "Stop"))
         self.assertAlmostEqual(net, -1.1)
+
+    def test_miss_explains_score_drag_or_tie(self):
+        from opening_momentum.review import METRICS, selection_review
+
+        features = {
+            symbol: dict.fromkeys(METRICS, 1)
+            for symbol in ("A", "B", "C", "D", "E", "F")
+        }
+        picks = rank_opening(features, dict.fromkeys(features, "Finance"))[:5]
+        self.assertIn("tie-break", selection_review("F", features, picks)["reason"])
+        features["F"]["relative_volume"] = 0.5
+        picks = rank_opening(features, dict.fromkeys(features, "Finance"))[:5]
+        review = selection_review("F", features, picks)
+        self.assertEqual(review["rank"], 6)
+        self.assertIn("relative_volume", review["reason"])
+
+    def test_later_filings_are_kept_out_of_cutoff_evidence(self):
+        from opening_momentum.review import evidence_by_cutoff
+
+        cutoff = at(DAY, 9, 45)
+        early = {"published_at": at(DAY, 9, 44).isoformat()}
+        late = {"published_at": at(DAY, 9, 46).isoformat()}
+        review = evidence_by_cutoff({"financial_filings": [early, late]}, cutoff)
+        self.assertEqual(review["by_0945"]["financial_filings"], [early])
+        self.assertEqual(review["after_0945"]["financial_filings"], [late])
