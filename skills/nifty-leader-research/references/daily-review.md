@@ -44,3 +44,11 @@ Keep the current baseline frozen while a revised challenger runs prospectively i
 ## Daily report
 
 Deliver: data coverage and session/cutoff; actual leaders and gap/intraday decomposition; evidence-backed explanations with uncertainty; original forecast versus outcomes; false-positive/false-negative/control comparisons; next-session timestamped paper shortlist; and a change log distinguishing observations, proposed tests and accepted corrections. If data is insufficient, issue the coverage report instead of manufacturing a forecast.
+
+## Opening Momentum review
+
+1. Use the frozen 09:45 IST features for all 50 stocks, the five picks and the closing top five. Record opening rank, closing rank, score gap to fifth place, tie-breaks, and each feature's score contribution. Compare missed leaders with selected names and nearby non-leaders. Mark older records without full frozen inputs as incomplete.
+2. Compare the completed prior daily trend, RSI, MACD, ADX, stochastic, ATR, support and resistance with opening price action, same-time relative volume, sector strength and candle-based VWAP. Inspect the post-cutoff move, including when a breakout became observable.
+3. Read timestamped NSE/company announcements and quarterly financials. Record the reporting period, release timestamp, link and relevant figures. Check sector news and reputable reporting when warranted. Label data gaps and keep releases through 09:45 distinct from later releases.
+4. Explain separately why the ranker excluded the name and why the trade failed to capture a move. Inspect simulated entry, stop, target, timed exit, costs and post-entry path for selected names. For missed names, treat any hypothetical entry and return as retrospective. Record any unverified catalyst as a hypothesis.
+5. Update the review procedure when evidence reveals a recurring gap. Log a measurable proposed feature and matched controls. Test alongside the frozen score across at least 30 eligible paired sessions before considering a change. Review the Opening Momentum Review tab and GitHub artifacts for evidence and coverage.
