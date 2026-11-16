@@ -2,7 +2,8 @@
 import json
 from collections import Counter
 from pathlib import Path
-from short_strangle.engine import Scenario, LEVELS, DISTANCES, CHOICES, QTY, COST, summary_rows
+from short_strangle.engine import Scenario, LEVELS, DISTANCES, CHOICES, QTY, summary_rows
+from paper_option_charges import MODEL, basket_charges
 
 def audit(state):
     scenarios = [Scenario(**raw) for raw in state['scenarios']]
@@ -17,7 +18,14 @@ def audit(state):
             if 'SL threshold' in reason and abs(price-round(s.entries[side]*(1+s.pct/100),2)) > .0001:
                 raise ValueError('Stop fill does not reconcile')
     return {'version':'strangle-v1', 'paper_only':True, 'scenarios':81,
-            'quantity_assumption':QTY, 'round_trip_cost_assumption':COST,
+            'quantity_assumption':QTY, 'charge_model':MODEL,
+            'estimated_charges_by_scenario': [
+                {'expiry_choice': s.choice, 'distance': s.distance, 'stop_pct': s.pct,
+                 'total': s.charges,
+                 'orders': {order: {name: float(value) for name, value in fees.items()}
+                            for order, fees in basket_charges(s.entries['CE'], s.exits['CE'][0],
+                                s.entries['PE'], s.exits['PE'][0], QTY).items()}}
+                for s in scenarios if len(s.exits) == 2],
             'statuses':dict(Counter(s.status for s in scenarios)),
             'summary':summary_rows(scenarios),
             'coverage_warning_scenarios':sum(bool(s.notes) for s in scenarios),

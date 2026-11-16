@@ -7,7 +7,7 @@ DISTANCES = (1, 1.5, 2)
 LEVELS = tuple(range(10, 51, 5))
 CHOICES = ('Current Week', 'Next Week', 'Monthly')
 QTY = 65
-COST = 150
+from paper_option_charges import MODEL, total_charges
 QUOTE_GAP = 'Open-contract quote gap >10 seconds; stop path incomplete'
 HIGH_RECONCILED = 'Stop outcomes reconciled from recorded session highs'
 
@@ -140,9 +140,16 @@ class Scenario:
         return 'RUNNING'
 
     @property
+    def charges(self):
+        if len(self.exits) != 2:
+            return ''
+        return total_charges(self.entries['CE'], self.exits['CE'][0],
+                             self.entries['PE'], self.exits['PE'][0], QTY)
+
+    @property
     def net(self):
         if len(self.exits) != 2: return ''
-        return round(sum(round(self.entries[s] - self.exits[s][0], 2) * QTY for s in ('CE', 'PE')) - COST, 2)
+        return round(sum(round(self.entries[s] - self.exits[s][0], 2) * QTY for s in ('CE', 'PE')) - self.charges, 2)
 
     def row(self):
         ce, pe = strikes(self.spot, self.distance)
@@ -153,8 +160,8 @@ class Scenario:
                 *[self.entries.get(s, '') for s in ('CE', 'PE')],
                 *[round(self.entries[s] * (1 + self.pct / 100), 2) if s in self.entries else '' for s in ('CE', 'PE')],
                 *[x(s, 0) for s in ('CE', 'PE')], *[x(s, 1) for s in ('CE', 'PE')],
-                *[x(s, 2) for s in ('CE', 'PE')], self.net, COST if self.entries else 0,
-                self.status, '; '.join(self.notes), QTY]
+                *[x(s, 2) for s in ('CE', 'PE')], self.net, self.charges,
+                self.status, '; '.join([*self.notes, MODEL]), QTY]
 
 def make_scenarios(day, spot, at, expiry_map, contracts):
     out = []
