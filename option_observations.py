@@ -218,6 +218,13 @@ class Observer:
             try:
                 r=self._request('history',dict(symbol=symbol,resolution='1',date_format='1',range_from=self.day,range_to=self.day,cont_flag='0'))
                 self.candles[symbol]=candle_high(r,self.day)
+                if self.candles[symbol].get('minutes', 0) < 330:
+                    time.sleep(3)
+                    retry = self._request('history', dict(symbol=symbol, resolution='1',
+                        date_format='1', range_from=self.day, range_to=self.day, cont_flag='0'))
+                    candidate = candle_high(retry, self.day)
+                    if candidate.get('minutes', 0) > self.candles[symbol].get('minutes', 0):
+                        r, self.candles[symbol] = retry, candidate
                 # Keep only validated in-window bars for holding-period checks.
                 start=int(datetime.fromisoformat(self.day+'T09:30:00+05:30').timestamp())
                 self.history[symbol]=[b for b in r.get('candles',[]) if len(b)>=6 and num(b[0])!='' and start<=b[0]<start+330*60 and not b[0]%60 and all(num(v)!='' for v in b[:6]) and 0<b[3]<=min(b[1],b[4])<=max(b[1],b[4])<=b[2]]

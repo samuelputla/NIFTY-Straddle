@@ -1,6 +1,7 @@
 """FYERS paper basket estimates for the option observation worker."""
 import math
 import os
+import time
 
 import requests
 
@@ -20,9 +21,19 @@ def estimate_margin(symbols, quantity):
     basket = [dict(symbol=symbol, qty=quantity, side=-1, type=2, productType='INTRADAY',
                    limitPrice=0, stopPrice=0, stopLoss=0, takeProfit=0) for symbol in symbols]
     try:
-        response = requests.post(URL, headers={'Authorization': authorization},
-                                 json={'data': basket}, timeout=(3, 6))
-        response.raise_for_status()
+        for attempt in range(2):
+            try:
+                response = requests.post(URL, headers={'Authorization': authorization},
+                                         json={'data': basket}, timeout=(3, 6))
+                response.raise_for_status()
+                break
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt:
+                    raise
+            except requests.HTTPError as error:
+                if attempt or error.response.status_code not in (429, 500, 502, 503, 504):
+                    raise
+            time.sleep(2)
         result = response.json()
         margin = result.get('data', {}).get('margin_total')
         if (result.get('s') == 'ok' and type(margin) in (int, float)
