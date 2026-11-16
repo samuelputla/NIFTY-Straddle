@@ -84,9 +84,14 @@ class ScopedWorksheet:
             if self.owned or len(rows) != count:
                 raise RuntimeError('Write does not match the collector row allocation')
             from gspread.utils import rowcol_to_a1
+            from requests.exceptions import ReadTimeout
             last = rowcol_to_a1(first + count - 1, len(self.headers) + 1)
             address = f'A{first}:{last}'
-            if any(value != '' for row in self.sheet.get(address) for value in row):
+            try:
+                existing = self.sheet.get(address)
+            except ReadTimeout:
+                existing = self.sheet.get(address)
+            if any(value != '' for row in existing for value in row):
                 raise RuntimeError('Allocated rows already contain data')
             self.sheet.update(range_name=address, values=values, value_input_option='RAW')
             self.owned.update(range(first, first + count))
