@@ -44,13 +44,26 @@ def read_studies(book, tabs):
     return summaries, logsets
 
 
+def collector_allocation(title, choice, env):
+    key, count = {SUMMARY: ('FIXED_SUMMARY_FIRST', 1), LOGS: ('FIXED_LOG_FIRST', 9)}.get(title, ('', 0))
+    first = env.get(key)
+    if first:
+        first = int(first)
+        if first < 2:
+            raise ValueError('Allocation must start below the header')
+        return first + CHOICES.index(choice) * count, count
+    if env.get('FIXED_REQUIRE_ALLOCATION') == 'true':
+        raise RuntimeError(f'Missing row allocation for {title}')
+    allocations = env.get('FIXED_ROW_ALLOCATIONS')
+    return json.loads(allocations)[title][choice] if allocations else None
+
+
 class ScopedWorksheet:
     """Expose original column positions while retaining physical shared-row indexes."""
     def __init__(self, sheet, headers, choice):
         self.sheet, self.headers, self.choice = sheet, headers, choice
         self.owned = set()
-        allocations = os.getenv('FIXED_ROW_ALLOCATIONS')
-        self.allocation = json.loads(allocations)[sheet.title][choice] if allocations else None
+        self.allocation = collector_allocation(sheet.title, choice, os.environ)
 
     def get_all_values(self):
         values = self.sheet.get_all_values()
@@ -191,4 +204,6 @@ if __name__ == '__main__':
         book = client.open_by_key('1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI')
         allocations = allocate_session_rows(book, day, test_mode)
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-            print('rows=' + json.dumps(allocations, separators=(',', ':')), file=output)
+            print(f"summary_first={allocations[SUMMARY][CHOICES[0]][0]}", file=output)
+            print(f"log_first={allocations[LOGS][CHOICES[0]][0]}", file=output)
+            print('collect=true', file=output)

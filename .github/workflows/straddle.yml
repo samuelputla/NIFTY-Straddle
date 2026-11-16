@@ -27,7 +27,9 @@ jobs:
   wait-for-session:
     outputs:
       allowed: ${{ steps.window.outputs.allowed }}
-      rows: ${{ steps.allocate.outputs.rows }}
+      collect: ${{ steps.allocate.outputs.collect }}
+      summary_first: ${{ steps.allocate.outputs.summary_first }}
+      log_first: ${{ steps.allocate.outputs.log_first }}
     # A runner started at 08:55 would reach its six-hour cap at 14:55.
     # Wait in a separate job; the monitoring job starts at/after 09:12.
     runs-on: ubuntu-latest
@@ -67,7 +69,7 @@ jobs:
           python -m pip install 'gspread>=6,<7'
           python fixed_sheet_store.py
   straddle:
-    if: ${{ inputs.setup_only || needs.wait-for-session.outputs.rows != '' }}
+    if: ${{ inputs.setup_only || needs.wait-for-session.outputs.collect == 'true' }}
     name: ${{ matrix.name }}
     needs: wait-for-session
     # One failed expiry must not cancel the other collectors.
@@ -98,7 +100,9 @@ jobs:
       TEST_MODE: ${{ inputs.test_mode || 'false' }}
       SETUP_ONLY: ${{ inputs.setup_only || 'false' }}
       MONITOR_MINUTES: "2"
-      FIXED_ROW_ALLOCATIONS: ${{ needs.wait-for-session.outputs.rows }}
+      FIXED_SUMMARY_FIRST: ${{ needs.wait-for-session.outputs.summary_first }}
+      FIXED_LOG_FIRST: ${{ needs.wait-for-session.outputs.log_first }}
+      FIXED_REQUIRE_ALLOCATION: ${{ !inputs.setup_only }}
 
     steps:
       - name: Checkout repository
