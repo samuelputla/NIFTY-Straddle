@@ -2,7 +2,7 @@
 import argparse
 import json
 import os
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from automation_dispatch import GitHub, ACTIVE
@@ -12,12 +12,8 @@ IST = ZoneInfo('Asia/Kolkata')
 BOOK = '1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 TARGETS = {
     'fixed': ('straddle.yml', time(8,55), time(9,25), {'test_mode':'false','setup_only':'false'}, ['Straddle Fixed Summary']),
-    'rolling': ('rolling-straddles.yml', time(8,55), time(9,25), {'setup_only':'false'}, ['Time Based Summary','Delta Based Summary']),
     'strangle': ('short-strangle.yml', time(9,10), time(9,25), {'mode':'collect'}, ['Short Strangle Summary']),
-    'abc': ('abc-equity-paper.yml', time(8,55), time(9,10), {'collect':'true'}, []),
     'close': ('short-strangle.yml', time(15,7), time(18,0), {'mode':'verify'}, []),
-    'study': ('nifty-study.yml', time(16,30), time(23,30), {'connection_check':'false'}, []),
-    'stocks': ('short-term-calls.yml', time(8,50), time(18,30), {'connection_check':'false'}, []),
 }
 
 def same_day(run, now):
@@ -29,7 +25,6 @@ def relevant(key, run, now):
     if event not in ('schedule','workflow_dispatch'): return False
     title = run.get('display_title','').lower()
     if 'setup' in title or 'connection check' in title or 'test mode' in title: return False
-    if key == 'abc' and 'shared sheet check' in title: return False
     if key in ('strangle','close'):
         created = datetime.fromisoformat(run['created_at'].replace('Z','+00:00')).astimezone(IST)
         # New run titles distinguish modes. Legacy ambiguous afternoon runs block
@@ -38,7 +33,6 @@ def relevant(key, run, now):
         if key == 'close':
             if 'collect' in title: return False
             if 'verify' not in title and created.time() < time(15,0): return False
-    if key == 'stocks':
         created = datetime.fromisoformat(run['created_at'].replace('Z','+00:00')).astimezone(IST)
         return run.get('status') in ACTIVE or created >= now - timedelta(minutes=14)
     return run.get('status') in ACTIVE or same_day(run,now)

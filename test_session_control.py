@@ -17,7 +17,7 @@ class ControlTests(unittest.TestCase):
     def test_late_start_never_dispatches(self):
         api=API([]);self.assertEqual(check(api,'fixed',NOW.replace(hour=10),lambda *a:False)['status'],'NOT DUE')
     def test_sheet_blocks_missing_run(self):
-        self.assertEqual(check(API([]),'rolling',NOW,lambda *a:True)['status'],'SHEET PRESENT; NO RESTART')
+        self.assertEqual(check(API([]),'fixed',NOW,lambda *a:True)['status'],'SHEET PRESENT; NO RESTART')
     def test_code_tests_do_not_block(self):
         row=self.runrow();row['event']='push'
         self.assertEqual(check(API([row]),'fixed',NOW,lambda *a:False,True)['status'],'WOULD DISPATCH')
