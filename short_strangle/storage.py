@@ -1,4 +1,5 @@
 """One batched write per minute, deterministic day ranges, no append retries."""
+from sheet_retries import retry_reserved_io
 from short_strangle.engine import SUMMARY, LOGS, HEADERS, SUMMARY_HEADERS, summary_rows, DISTANCES, CHOICES, LEVELS
 
 def quoted(name): return "'" + name.replace("'", "''") + "'"
@@ -54,4 +55,6 @@ class Store:
             if end > self.tabs[name].row_count:
                 self.tabs[name].resize(rows=end + 1000)
             data.append({'range': quoted(name) + '!A' + str(self.start[name]), 'values': rows})
-        self.book.values_batch_update({'valueInputOption': 'RAW', 'data': data})
+        # Writes target deterministic ranges. Avoid long waits in live monitoring.
+        retry_reserved_io(lambda: self.book.values_batch_update(
+            {'valueInputOption': 'RAW', 'data': data}), delays=(2,))
