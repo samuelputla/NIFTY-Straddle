@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from short_strangle.engine import HIGH_RECONCILED, HEADERS, SUMMARY_HEADERS, LEVELS, DISTANCES, CHOICES
 from request_timing import run_with_timeout
 from short_strangle.candle_check import apply_check
+from paper_option_charges import MODEL, total_charges
 
 IST = ZoneInfo('Asia/Kolkata')
 BOOK = '1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
@@ -55,12 +56,15 @@ def reconcile(row, marks, day):
             note = 'Recovered missing exit from FYERS 15:00 minute open; simulated price, stop path unverified'
             row[26] = '; '.join(filter(None, [row[26], note])) if note not in row[26] else row[26]
     complete = all(positive(row[i]) for i in (13,14,17,18,27))
-    complete = complete and number(row[24]) is not None and number(row[24]) >= 0
+    estimated_charges = MODEL in str(row[26])
+    complete = complete and (estimated_charges or (number(row[24]) is not None and number(row[24]) >= 0))
     complete = complete and all(row[i] for i in (19,20,21,22))
     if complete:
         for at in (row[19], row[20]):
             if not at.startswith(day + 'T') or at < row[10]:
                 raise ValueError('Invalid exit chronology')
+        if estimated_charges:
+            row[24] = total_charges(*(float(row[i]) for i in (13, 17, 14, 18, 27)))
         row[23] = round(sum(round(float(row[e])-float(row[x]),2)*float(row[27])
                             for e,x in ((13,17),(14,18))) - float(row[24]),2)
         row[25] = 'COMPLETED'

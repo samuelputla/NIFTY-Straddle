@@ -29,7 +29,7 @@ class SessionHighTests(unittest.TestCase):
                     'CE': self.evidence('CE', high), 'PE': self.evidence('PE', 109)}))
                 self.assertEqual(self.scenario.exits['CE'][0], 110)
                 self.assertEqual(self.scenario.exits['PE'][0], 90)
-                self.assertEqual(self.scenario.net, -150)
+                self.assertEqual(self.scenario.net, -128.0)
                 self.assertNotIn(QUOTE_GAP, self.scenario.notes)
                 self.assertTrue(any(HIGH_RECONCILED in n for n in self.scenario.notes))
 

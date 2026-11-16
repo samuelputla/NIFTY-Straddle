@@ -37,7 +37,7 @@ LEGACY_SL_PERCENTAGES = [10, 15, 20, 25, 30, 35, 40]
 EXTRA_SL_PERCENTAGES = [45, 50]
 SL_PERCENTAGES = LEGACY_SL_PERCENTAGES + EXTRA_SL_PERCENTAGES
 CONTRACT_QTY = 65
-ROUND_TRIP_CHARGES_RUPEES = 150
+from paper_option_charges import MODEL, basket_charges, total_charges
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
 SCENARIO_SHEET_NAME = "Straddle Fixed Logs"
@@ -553,7 +553,7 @@ def make_daily_row(run_status):
         ce_net = round(ce_entry - ce_exit, 2) if ce_exit is not None else ""
         pe_net = round(pe_entry - pe_exit, 2) if pe_exit is not None else ""
         total = (
-            round((ce_net + pe_net) * CONTRACT_QTY - ROUND_TRIP_CHARGES_RUPEES, 2)
+            round((ce_net + pe_net) * CONTRACT_QTY - total_charges(ce_entry, ce_exit, pe_entry, pe_exit, CONTRACT_QTY), 2)
             if ce_net != "" and pe_net != ""
             else ""
         )
@@ -1300,8 +1300,10 @@ for percent in SL_PERCENTAGES:
     scenario = state["scenarios"][percent]
     ce_net = round(ce_entry - scenario["ce_exit"], 2)
     pe_net = round(pe_entry - scenario["pe_exit"], 2)
+    charge_args = (ce_entry, scenario['ce_exit'], pe_entry, scenario['pe_exit'], CONTRACT_QTY)
+    charges = total_charges(*charge_args)
     total_net = round(
-        (ce_net + pe_net) * CONTRACT_QTY - ROUND_TRIP_CHARGES_RUPEES,
+        (ce_net + pe_net) * CONTRACT_QTY - charges,
         2,
     )
     print(
@@ -1311,8 +1313,10 @@ for percent in SL_PERCENTAGES:
         f"PE exit {scenario['pe_exit']:.2f} ({scenario['pe_exit_reason']}) "
         f"per-unit P&L {pe_net:.2f} | "
         f"Net {total_net:.2f} after qty {CONTRACT_QTY} and charges "
-        f"Rs {ROUND_TRIP_CHARGES_RUPEES}"
+        f"Rs {charges:.2f} ({MODEL})"
     )
+    print({order: {fee: float(value) for fee, value in parts.items()}
+           for order, parts in basket_charges(*charge_args).items()})
 print(f"Google Sheet tabs: {SCENARIO_SHEET_NAME}, {DAILY_SHEET_NAME}")
 print("Paper monitoring only; no order was placed.")
 

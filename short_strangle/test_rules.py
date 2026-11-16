@@ -17,7 +17,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(s.net, '')
         s.finish({s.symbols['PE']:80},'2026-11-09T15:00:02+05:30')
         self.assertEqual(s.status, 'COMPLETED')
-        self.assertEqual(s.net, 1800)
+        self.assertEqual(s.net, 1823.06)
         self.assertTrue(s.notes)
 
     def test_report_rejects_duplicate_and_bad_stop(self):
@@ -53,7 +53,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(a.entries['CE'],100)
         a.finish(dict.fromkeys(a.symbols.values(),50),'2026-11-09T15:00:01+05:30')
         self.assertEqual(a.exits['CE'][0],110)
-        self.assertEqual(a.net,2450)
+        self.assertEqual(a.net,2473.47)
 
     def test_missing_entry_and_final_never_zero(self):
         s = sample()[0]
