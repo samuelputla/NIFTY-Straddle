@@ -32,6 +32,7 @@ EXTRA_SL_PERCENTAGES = [45, 50]
 SL_PERCENTAGES = LEGACY_SL_PERCENTAGES + EXTRA_SL_PERCENTAGES
 CONTRACT_QTY = 65
 from paper_option_charges import MODEL, basket_charges, total_charges
+from sheet_retries import retry_reserved_io
 NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 VIX_SYMBOL = "NSE:INDIAVIX-INDEX"
 SCENARIO_SHEET_NAME = "Straddle Fixed Logs"
@@ -1111,9 +1112,9 @@ def poll_day_open():
 
 poll_day_open()
 poll_entry_metadata()
-update_scenario_rows(SL_PERCENTAGES)
-if daily_row_number is not None:
-    write_daily_row("RUNNING")
+with state_lock:
+    pending_scenario_updates.update(SL_PERCENTAGES)
+next_sheet_update = 0.0
 
 def save_execution_evidence():
     global last_measurement_save
@@ -1127,16 +1128,18 @@ def save_execution_evidence():
         print('Measurement checkpoint pending:', type(exc).__name__, flush=True)
 
 while not stop_event.wait(timeout=0.5):
-    if time_module.monotonic() - last_measurement_save >= 30:
+    if time_module.monotonic() - last_measurement_save >= 120:
         save_execution_evidence()
         observations.checkpoint()
     changed_opening = poll_day_open()
     changed_metadata = poll_entry_metadata() or changed_opening
     with state_lock:
-        changes = set(pending_scenario_updates)
-        pending_scenario_updates.clear()
-    if changed_metadata:
-        changes.update(SL_PERCENTAGES)
+        if changed_metadata:
+            pending_scenario_updates.update(SL_PERCENTAGES)
+        changes = set()
+        if time_module.monotonic() >= next_sheet_update:
+            changes = set(pending_scenario_updates)
+            pending_scenario_updates.clear()
     if changes:
         try:
             update_scenario_rows(changes)
@@ -1146,6 +1149,8 @@ while not stop_event.wait(timeout=0.5):
             with state_lock:
                 pending_scenario_updates.update(changes)
             print(f"Sheet update retry queued: {type(exc).__name__}", flush=True)
+        finally:
+            next_sheet_update = time_module.monotonic() + 15
 
 # Pull one batched closing quote after the monitor has stopped; if the REST
 # snapshot fails, use the final WebSocket LTP received before the deadline.
@@ -1194,9 +1199,14 @@ with state_lock:
             scenario["pe_exit_reason"] = final_reason
     state["complete"] = True
 
-update_scenario_rows(SL_PERCENTAGES)
+Path('fixed_final_sheet_rows.json').write_text(json.dumps({
+    'expiry_choice': EXPIRY_CHOICE,
+    'logs': {'headers': SCENARIO_HEADERS, 'rows': [make_scenario_row(p) for p in SL_PERCENTAGES]},
+    'summary': {'headers': DAILY_HEADERS, 'row': make_daily_row("COMPLETED")},
+}), encoding='utf-8')
+retry_reserved_io(lambda: update_scenario_rows(SL_PERCENTAGES))
 if daily_row_number is not None:
-    write_daily_row("COMPLETED")
+    retry_reserved_io(lambda: write_daily_row("COMPLETED"))
 
 print("\n=================================================")
 save_execution_evidence()
