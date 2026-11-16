@@ -1,0 +1,19 @@
+name: Retry Fixed Entry Startup
+on:
+  push:
+    branches: [codex/fixed-startup-retry-20261116]
+permissions:
+  actions: write
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Dispatch within today's entry window
+        run: |
+          [[ "$(TZ=Asia/Kolkata date +%F)" == "2026-11-16" ]]
+          [[ "$(TZ=Asia/Kolkata date +%H%M)" < "0933" ]]
+          gh workflow run straddle.yml --ref main -f setup_only=false -f test_mode=false
