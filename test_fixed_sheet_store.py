@@ -2,7 +2,7 @@ import copy
 import json
 from unittest.mock import patch
 import unittest
-from fixed_sheet_store import CHOICES, LOGS, SUMMARY, ScopedWorksheet, allocate_session_rows, appended_row, reserve_daily, select_choice
+from fixed_sheet_store import CHOICES, LOGS, SUMMARY, ScopedWorksheet, allocate_session_rows, collector_allocation, appended_row, reserve_daily, select_choice
 
 class FakeSpreadsheet:
     def __init__(self, sheet):
@@ -101,6 +101,14 @@ class StoreTests(unittest.TestCase):
             sheet.get.return_value = [['2026-11-12']]
             with self.assertRaisesRegex(RuntimeError, 'already contain data'):
                 occupied.append_rows([['2026-11-12', 10], ['2026-11-12', 15]])
+
+    def test_plain_job_outputs_address_each_expiry(self):
+        env = {'FIXED_SUMMARY_FIRST': '100', 'FIXED_LOG_FIRST': '800',
+               'FIXED_REQUIRE_ALLOCATION': 'true'}
+        self.assertEqual(collector_allocation(SUMMARY, 'Monthly', env), (102, 1))
+        self.assertEqual(collector_allocation(LOGS, 'Next Week', env), (809, 9))
+        with self.assertRaisesRegex(RuntimeError, 'Missing row allocation'):
+            collector_allocation(LOGS, 'Next Week', {'FIXED_REQUIRE_ALLOCATION': 'true'})
 
     def test_unknown_append_outcome_fails_closed(self):
         with self.assertRaises(RuntimeError):
