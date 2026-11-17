@@ -2,7 +2,7 @@
 import argparse
 import json
 import os
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from automation_dispatch import GitHub, ACTIVE
@@ -33,7 +33,6 @@ def relevant(key, run, now):
         if key == 'close':
             if 'collect' in title: return False
             if 'verify' not in title and created.time() < time(15,0): return False
-        created = datetime.fromisoformat(run['created_at'].replace('Z','+00:00')).astimezone(IST)
         return run.get('status') in ACTIVE or created >= now - timedelta(minutes=14)
     return run.get('status') in ACTIVE or same_day(run,now)
 
