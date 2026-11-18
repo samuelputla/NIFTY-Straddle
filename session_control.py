@@ -12,8 +12,11 @@ IST = ZoneInfo('Asia/Kolkata')
 BOOK = '1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 TARGETS = {
     'multi': ('multi-strike-publish.yml', time(16,15), time(23,59), {}, []),
-    'fixed': ('straddle.yml', time(8,55), time(9,25), {'test_mode':'false','setup_only':'false'}, ['Straddle Fixed Summary']),
-    'strangle': ('short-strangle.yml', time(9,10), time(9,25), {'mode':'collect'}, ['Short Strangle Summary']),
+    # A final 09:25 readiness gate can dispatch only until 09:35 IST.
+    # The Fixed Entry workflow independently rejects a run that reaches its
+    # collector window late; this does not create a post-entry retry path.
+    'fixed': ('straddle.yml', time(8,55), time(9,35), {'test_mode':'false','setup_only':'false'}, ['Straddle Fixed Summary']),
+    'strangle': ('short-strangle.yml', time(9,10), time(9,35), {'mode':'collect'}, ['Short Strangle Summary']),
     'close': ('short-strangle.yml', time(15,7), time(18,0), {'mode':'verify'}, []),
 }
 
@@ -28,8 +31,6 @@ def relevant(key, run, now):
     if 'setup' in title or 'connection check' in title or 'test mode' in title: return False
     if key in ('strangle','close'):
         created = datetime.fromisoformat(run['created_at'].replace('Z','+00:00')).astimezone(IST)
-        # New run titles distinguish modes. Legacy ambiguous afternoon runs block
-        # a second dispatch for review rather than risk duplicate collection.
         if key == 'strangle' and 'verify' in title: return False
         if key == 'close':
             if 'collect' in title: return False
@@ -50,7 +51,6 @@ def check(api, key, now, has_entry, dry_run=False):
         return {'target':key,'status':'SHEET PRESENT; NO RESTART'}
     if dry_run: return {'target':key,'status':'WOULD DISPATCH'}
     if blockers(): return {'target':key,'status':'RACING RUN; NO DISPATCH'}
-    # Check real time again after remote reads. Never let slow calls extend entry cutoff.
     current = datetime.now(IST)
     if current.date() != now.date() or not start <= current.time() < end:
         return {'target':key,'status':'WINDOW ENDED'}
@@ -85,4 +85,3 @@ def main():
             out.write('## Paper workflow fallback\n'+ '\n'.join('- '+r['target']+': '+r['status'] for r in results))
 
 if __name__=='__main__':main()
-
