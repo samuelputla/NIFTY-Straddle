@@ -1216,6 +1216,7 @@ def save_execution_evidence():
 while not stop_event.wait(timeout=0.5):
     if time_module.monotonic() - last_measurement_save >= 120:
         save_execution_evidence()
+        observations.supply_index_context(previous_ohlc, day_open if 'OPENING FROM DAILY HISTORY' in entry_data_status else None)
         observations.checkpoint()
     changed_opening = poll_day_open()
     changed_metadata = poll_entry_metadata() or changed_opening
@@ -1301,6 +1302,7 @@ try:
         for side in ('CE','PE'):
             at=scenario[side.lower()+'_exit_time']
             observations.exited('Fixed Entry',EXPIRY_CHOICE,pct,1,side,at.isoformat() if at else '',scenario[side.lower()+'_exit_reason'])
+    observations.supply_index_context(previous_ohlc, day_open if 'OPENING FROM DAILY HISTORY' in entry_data_status else None)
     observations.finish()
 except Exception as error:
     print('Optional option observations unavailable:',type(error).__name__)
