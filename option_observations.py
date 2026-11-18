@@ -53,6 +53,7 @@ class Observer:
         self.futures=[];self.pool=ThreadPoolExecutor(max_workers=1)
         self.margin_entries={};self.margin_cache={};self.margin_results={}
         self.cache={};self.next_request=0;self.pending_publish=None
+        self.collector_context = {}
         if enabled:self.futures.append(self.pool.submit(self._context))
 
     def _request(self, method, payload):
@@ -81,6 +82,21 @@ class Observer:
             self._raw('context.json',r)
         except Exception as e:
             with self.lock:self.context={'at':stamp(),'status':type(e).__name__+'; context unavailable'}
+
+    def supply_index_context(self, previous, opening):
+        """Reuse daily history already confirmed by the Fixed Entry collector."""
+        prior = previous.get('date')
+        candidate = {}
+        if prior and str(prior) < self.day:
+            prices = {key: num(previous.get(key)) for key in ('high', 'low', 'close')}
+            if all(value != '' and value > 0 for value in prices.values()):
+                candidate.update(date=str(prior), **prices)
+        opening = num(opening)
+        if opening != '' and opening > 0:
+            candidate['open'] = opening
+        if candidate:
+            with self.lock:
+                self.collector_context.update(candidate)
 
     def register(self, family, choice, expiry, pct, cycle, side, symbol, entry_at, premium, stop):
         if not self.enabled:return
@@ -168,6 +184,13 @@ class Observer:
 
     def rows(self):
         with self.lock:entries=copy.deepcopy(self.entries);snapshots=copy.deepcopy(self.snapshots);ticks=copy.deepcopy(self.ticks);context=dict(self.context);candles=copy.deepcopy(self.candles)
+        with self.lock:
+            collector_context = dict(self.collector_context)
+        filled = [key for key in collector_context if context.get(key) in (None, '')]
+        if filled:
+            context.update({key: collector_context[key] for key in filled})
+            context['at'] = ''  # Original observer timestamp is not the fallback retrieval time.
+            context['status'] = 'NIFTY context supplemented from Fixed Entry FYERS daily history'
         entry_rows=[];high_rows=[]
         for key,e in entries.items():
             base=[key,self.day,e['family'],e['choice'],e['expiry'],e['pct'],e['cycle'],e['side'],e['symbol'],e['entry_at']]
