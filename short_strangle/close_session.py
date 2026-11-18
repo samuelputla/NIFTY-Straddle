@@ -3,7 +3,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -81,7 +81,19 @@ def main():
     if not os.environ.get('GITHUB_RUN_ID'):
         raise RuntimeError('Use the concurrency-protected workflow')
     now = datetime.now(IST)
-    day = os.environ.get('SESSION_DATE') or now.date().isoformat()
+    day = os.environ.get('SESSION_DATE')
+    if not day:
+        session = now.date()
+        if now.hour < 9:
+            from market_calendar import session_allowed
+            session -= timedelta(days=1)
+            for _ in range(10):
+                if session_allowed(session.isoformat())[0]:
+                    break
+                session -= timedelta(days=1)
+            else:
+                raise RuntimeError('Could not identify prior completed market session')
+        day = session.isoformat()
     if os.environ.get('GITHUB_EVENT_NAME') == 'push':
         day = json.loads(Path('.automation/short-strangle-close.json').read_text())['requested_session']
     datetime.strptime(day, '%Y-%m-%d')

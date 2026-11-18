@@ -11,6 +11,7 @@ from market_calendar import session_allowed
 IST = ZoneInfo('Asia/Kolkata')
 BOOK = '1yWpG7oLIpdT7MeX9yRQb6c1jTKXcfCDt4mH_x6mpeWI'
 TARGETS = {
+    'multi': ('multi-strike-publish.yml', time(16,15), time(23,59), {}, []),
     'fixed': ('straddle.yml', time(8,55), time(9,25), {'test_mode':'false','setup_only':'false'}, ['Straddle Fixed Summary']),
     'strangle': ('short-strangle.yml', time(9,10), time(9,25), {'mode':'collect'}, ['Short Strangle Summary']),
     'close': ('short-strangle.yml', time(15,7), time(18,0), {'mode':'verify'}, []),
