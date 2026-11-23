@@ -34,6 +34,10 @@ def build(fixed_logs, fixed_summary, strangle_logs, snapshots):
                  for r in records(fixed_summary)}
     fixed, strangle = defaultdict(dict), defaultdict(dict)
 
+    def prices_complete(row, fields):
+        values = [number(row.get(field)) for field in fields]
+        return all(value is not None and value > 0 for value in values)
+
     def greeks(prefix, symbols):
         legs = [sn.get(prefix + side, {}) for side in ('CE', 'PE')]
         if any(leg.get('Symbol') != symbol for leg, symbol in zip(legs, symbols)):
@@ -44,7 +48,7 @@ def build(fixed_logs, fixed_summary, strangle_logs, snapshots):
     for r in records(fixed_logs):
         d, choice, expiry = r.get('Date'), r.get('Expiry Choice'), r.get('Expiry')
         sl = r.get('SL %')
-        if day(d) < START or not choice or r.get('Status') != 'COMPLETED':
+        if day(d) < START or not choice or not prices_complete(r, ('CE Entry', 'PE Entry', 'CE Exit Price', 'PE Exit Price')):
             continue
         net = number(summaries.get((d, choice, expiry), {}).get(f'{sl}% Profit'))
         if net is None:
@@ -61,7 +65,7 @@ def build(fixed_logs, fixed_summary, strangle_logs, snapshots):
         d, choice, expiry = r.get('Date'), r.get('Expiry Choice'), r.get('Expiry')
         distance, sl = r.get('Distance %'), r.get('SL %')
         net = number(r.get('Net P&L'))
-        if day(d) < START or not choice or net is None or r.get('Status') != 'COMPLETED':
+        if day(d) < START or not choice or net is None or not prices_complete(r, ('CE Entry', 'PE Entry', 'CE Exit', 'PE Exit')):
             continue
         key = (choice, expiry, distance, sl)
         if key in strangle[d]:
