@@ -15,6 +15,7 @@ class Store:
     def __init__(self, book, day):
         self.book = book
         self.day = day
+        self.saved = False
         self.schemas = {SUMMARY: SUMMARY_HEADERS, LOGS: HEADERS}
         tabs = {w.title: w for w in book.worksheets()}
         if any(n not in tabs for n in self.schemas):
@@ -34,19 +35,24 @@ class Store:
     def save(self, scenarios):
         incoming = {SUMMARY: summary_rows(scenarios), LOGS: [s.row() for s in scenarios]}
         self._write(incoming)
+        self.saved = True
 
-    def reserve(self):
+    def reserve(self, status='STARTING', note=''):
         """Claim the session before market capture; slow Sheets must not delay entry."""
         summaries, logs = [], []
         for distance in DISTANCES:
             for choice in CHOICES:
-                summaries.append([self.day, distance, choice, '', 'STARTING'] + [''] * 10)
+                summaries.append([self.day, distance, choice, '', status] + [''] * 9 + [note])
                 for pct in LEVELS:
                     row = [''] * len(HEADERS)
                     row[:6] = [f'strangle-v1|{self.day}|{distance}|{choice}|{pct}', self.day, distance, choice, '', pct]
-                    row[25] = 'STARTING'
+                    row[25], row[26] = status, note
                     logs.append(row)
         self._write({SUMMARY:summaries, LOGS:logs})
+
+    def fail_startup(self, note):
+        if not self.saved:
+            self.reserve('INCOMPLETE', note)
 
     def _write(self, incoming):
         data = []
