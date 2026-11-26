@@ -289,7 +289,7 @@ def poll_previous_history():
     """Optional context starts after the websocket; never gates premium capture."""
     global previous_started, previous_deadline, previous_ohlc, gap_text, entry_data_status
     global previous_attempts, previous_next_retry
-    if not previous_started and previous_attempts < 3 and time_module.monotonic() >= previous_next_retry:
+    if not previous_started and previous_attempts < 10 and time_module.monotonic() >= previous_next_retry:
         previous_attempts += 1
         previous_requests["PREVIOUS"] = start_request(get_previous_day_ohlc, capture_time.date())
         previous_deadline = time_module.monotonic() + 7
@@ -299,7 +299,8 @@ def poll_previous_history():
         if error is not None:
             previous_started = False
             previous_next_retry = time_module.monotonic() + 20
-            entry_data_status += "; PREVIOUS SESSION HISTORY UNAVAILABLE"
+            if previous_attempts == 10:
+                entry_data_status += "; PREVIOUS SESSION HISTORY UNAVAILABLE AFTER 10 ATTEMPTS"
             print(f"Previous session history unavailable: {type(error).__name__}; premium monitoring continues.", flush=True)
         else:
             previous_ohlc = value
@@ -1080,32 +1081,44 @@ opening_next_retry = time_module.monotonic() + 25
 opening_request_deadline = None
 opening_finished = False
 
-# The socket now processes ticks while metadata and Sheets work continues.
-with state_lock:
-    scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
-scenario_first_row = append_scenario_rows(scenario_rows)
-scenario_row_numbers = {
-    percent: scenario_first_row + index
-    for index, percent in enumerate(SL_PERCENTAGES)
-}
-print(
-    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
-    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
-)
+def capture_entry_vix(delay):
+    """Retry transient quote failures inside the entry capture window."""
+    if delay > 0:
+        time_module.sleep(delay)
+    for attempt in range(3):
+        if (now_ist() - capture_time).total_seconds() >= 30:
+            raise TimeoutError("India VIX entry window expired")
+        try:
+            quotes = get_quotes([VIX_SYMBOL])
+            return ltp_from_quote(quotes[VIX_SYMBOL], "India VIX"), now_ist()
+        except Exception:
+            if attempt == 2:
+                raise
+            time_module.sleep(1)
 
 
 def poll_entry_metadata():
-    previous_changed = poll_previous_history()
     global india_vix, vix_retrieved_at, vix_snapshot_status
+    previous_changed = poll_previous_history()
+    vix_results = collect_ready_requests(vix_requests)
+    if "VIX" in vix_results:
+        result, error = vix_results["VIX"]
+        if error is not None:
+            vix_snapshot_status = "UNAVAILABLE"
+            print(f"VIX metadata unavailable: {type(error).__name__}", flush=True)
+        else:
+            vix_value, vix_retrieved_at = result
+            if (vix_retrieved_at - capture_time).total_seconds() <= 30:
+                india_vix = vix_value
+                vix_snapshot_status = "ENTRY REFRESH"
+            else:
+                vix_snapshot_status = f"UNAVAILABLE AT ENTRY; later value {vix_value} at {fmt_time(vix_retrieved_at)} IST"
     global call_oi, put_oi, pcr, market_bias, oi_retrieved_at, oi_snapshot_status
     global metadata_started, metadata_deadline, metadata_attempts, metadata_next_retry
-    if not metadata_started:
-        if time_module.monotonic() < metadata_start_at:
-            return previous_changed
-        metadata_requests.update({
-            **({"VIX": start_request(timestamped_metadata, get_quotes, [VIX_SYMBOL])} if india_vix is None and (now_ist() - capture_time).total_seconds() <= 30 else {}),
-            **({"OI": start_request(timestamped_metadata, refresh_optionchain_for_oi)} if oi_snapshot_status != "ENTRY REFRESH" and not oi_snapshot_status.startswith("DELAYED METADATA") else {}),
-        })
+    if (not metadata_started and metadata_attempts < 3
+            and time_module.monotonic() >= max(metadata_start_at, metadata_next_retry)):
+        metadata_attempts += 1
+        metadata_requests["OI"] = start_request(timestamped_metadata, refresh_optionchain_for_oi)
         metadata_deadline = time_module.monotonic() + 15
         metadata_started = True
     results = collect_ready_requests(
@@ -1116,39 +1129,25 @@ def poll_entry_metadata():
             if error is not None:
                 raise error
             value, retrieved_at = result
-            if name == "VIX":
-                vix_value = ltp_from_quote(value[VIX_SYMBOL], "India VIX")
-                vix_retrieved_at = retrieved_at
-                if (retrieved_at - capture_time).total_seconds() <= 30:
-                    india_vix = vix_value
-                    vix_snapshot_status = "ENTRY REFRESH"
-                else:
-                    vix_snapshot_status = f"UNAVAILABLE AT ENTRY; later value {vix_value} at {fmt_time(retrieved_at)} IST"
-            else:
-                if value.get("s") != "ok":
-                    raise RuntimeError("OI refresh failed")
-                data = value["data"]
-                new_call = int(data["callOi"])
-                new_put = int(data["putOi"])
-                if new_call < 0 or new_put < 0:
-                    raise ValueError("Negative OI")
-                call_oi, put_oi = new_call, new_put
-                pcr, market_bias = daily_bias(put_oi, call_oi)
-                oi_retrieved_at = retrieved_at
-                oi_snapshot_status = ("ENTRY REFRESH" if (retrieved_at - capture_time).total_seconds() <= 30 else "DELAYED METADATA; NOT ENTRY SNAPSHOT")
+            if value.get("s") != "ok":
+                raise RuntimeError("OI refresh failed")
+            data = value["data"]
+            new_call = int(data["callOi"])
+            new_put = int(data["putOi"])
+            if new_call < 0 or new_put < 0:
+                raise ValueError("Negative OI")
+            call_oi, put_oi = new_call, new_put
+            pcr, market_bias = daily_bias(put_oi, call_oi)
+            oi_retrieved_at = retrieved_at
+            oi_snapshot_status = ("ENTRY REFRESH" if (retrieved_at - capture_time).total_seconds() <= 30 else "DELAYED METADATA; NOT ENTRY SNAPSHOT")
             print(f"{name} snapshot retrieved at {fmt_time(retrieved_at)} IST", flush=True)
         except Exception as exc:
-            if name == "VIX":
-                vix_snapshot_status = "UNAVAILABLE"
-                metadata_started = False
-                metadata_next_retry = time_module.monotonic() + 20
-            else:
-                oi_snapshot_status = "PRE-ENTRY FALLBACK: entry refresh unavailable"
-                metadata_started = False
-                metadata_next_retry = time_module.monotonic() + 20
+            oi_snapshot_status = "PRE-ENTRY FALLBACK: entry refresh unavailable"
+            metadata_started = False
+            metadata_next_retry = time_module.monotonic() + 20
             print(f"{name} metadata unavailable: {type(exc).__name__}", flush=True)
     # Entry premiums, entry timestamp, stop thresholds and fills are never changed here.
-    return bool(results) or previous_changed
+    return bool(results or vix_results) or previous_changed
 
 
 
@@ -1193,8 +1192,23 @@ def poll_day_open():
     return False
 
 
+metadata_vix_delay = max(0, metadata_start_at - time_module.monotonic())
+vix_requests = {"VIX": start_request(capture_entry_vix, metadata_vix_delay)}
 poll_day_open()
 poll_entry_metadata()
+
+# The socket now processes ticks while metadata and Sheets work continues.
+with state_lock:
+    scenario_rows = [make_scenario_row(percent) for percent in SL_PERCENTAGES]
+scenario_first_row = append_scenario_rows(scenario_rows)
+scenario_row_numbers = {
+    percent: scenario_first_row + index
+    for index, percent in enumerate(SL_PERCENTAGES)
+}
+print(
+    f"Google Sheet {SCENARIO_SHEET_NAME} rows: "
+    f"{scenario_first_row}-{scenario_first_row + len(SL_PERCENTAGES) - 1}"
+)
 with state_lock:
     pending_scenario_updates.update(SL_PERCENTAGES)
 next_sheet_update = 0.0
